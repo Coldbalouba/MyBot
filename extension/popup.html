@@ -1,0 +1,57 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      width: 280px;
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      padding: 20px;
+      background: #0d0d1f;
+      color: #e0e0ff;
+    }
+    h2 {
+      color: #00d4ff;
+      font-size: 14px;
+      font-weight: 700;
+      letter-spacing: 1px;
+      margin-bottom: 14px;
+    }
+    .status-row {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      padding: 10px 14px;
+      border-radius: 8px;
+      background: rgba(0, 212, 255, 0.06);
+      border: 1px solid rgba(0, 212, 255, 0.15);
+    }
+    .dot {
+      width: 10px; height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+    .dot.on  { background: #4CAF50; box-shadow: 0 0 8px #4CAF5088; }
+    .dot.off { background: #ff4477; box-shadow: 0 0 8px #ff447788; }
+    .label { font-size: 12px; color: #c0c0e0; }
+    .info {
+      color: #555577;
+      font-size: 10px;
+      margin-top: 14px;
+      line-height: 1.5;
+    }
+  </style>
+</head>
+<body>
+  <h2>🤖 AI Browser Bridge</h2>
+  <div class="status-row">
+    <div id="dot" class="dot off"></div>
+    <span id="label" class="label">Checking…</span>
+  </div>
+  <p class="info">
+    This extension connects your Chrome to the AI Browser dock app
+    via a local WebSocket relay. No data leaves your machine.
+  </p>
+  <script src="popup.js"></script>
+</body>
+</html>

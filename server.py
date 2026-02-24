@@ -1,8 +1,10 @@
 """
-server.py — Headless API Server for AI Browser
+server.py — MyBot Headless API Server
 ================================================
 REST/SSE server for running browser automation without the PyQt6 dock.
 Use for: Android clients, free VPS hosting, headless deployment.
+
+Created by AJ (Ahmed Jouini).
 
 Usage:
   python server.py                    # Run on http://0.0.0.0:8765
@@ -189,7 +191,7 @@ def create_app():
         raise RuntimeError("Install FastAPI and uvicorn: pip install fastapi uvicorn")
 
     app = FastAPI(
-        title="AI Browser API",
+        title="MyBot API",
         description="Headless browser automation via AI",
         version="1.0.0",
     )
@@ -215,7 +217,7 @@ def create_app():
     @app.on_event("startup")
     async def startup():
         ensure_qt()
-        log.info("AI Browser server ready")
+        log.info("MyBot server ready")
 
     @app.get("/health")
     async def health():
@@ -349,7 +351,7 @@ def create_app():
 
 def main():
     import argparse
-    parser = argparse.ArgumentParser(description="AI Browser headless API server")
+    parser = argparse.ArgumentParser(description="MyBot headless API server")
     parser.add_argument("--host", default="0.0.0.0", help="Bind host")
     parser.add_argument("--port", type=int, default=8765, help="Bind port")
     parser.add_argument("--reload", action="store_true", help="Enable hot reload")

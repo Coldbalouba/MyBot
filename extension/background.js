@@ -1,5 +1,5 @@
 /**
- * background.js — AI Browser Bridge Service Worker
+ * background.js — MyBot Bridge Service Worker
  * ==================================================
  * Maintains a WebSocket connection to the Python dock app and
  * executes browser-automation commands on its behalf.
@@ -88,9 +88,9 @@ async function injectKeepaliveIntoAllTabs() {
         // Some tabs may not be scriptable — that's fine
       }
     }
-    console.log("[AI Bridge] Injected keepalive.js into existing tabs");
+    console.log("[MyBot Bridge] Injected keepalive.js into existing tabs");
   } catch (e) {
-    console.error("[AI Bridge] Failed to inject keepalive:", e);
+    console.error("[MyBot Bridge] Failed to inject keepalive:", e);
   }
 }
 
@@ -107,7 +107,7 @@ function connect() {
     ws.onopen = () => {
       wsConnected = true;
       reconnectDelay = RECONNECT_DELAY_MS; // reset backoff on success
-      console.log("[AI Bridge] Connected to dock app");
+      console.log("[MyBot Bridge] Connected to dock app");
 
       // Announce ourselves
       chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -130,13 +130,13 @@ function connect() {
       try {
         msg = JSON.parse(event.data);
       } catch {
-        console.error("[AI Bridge] Bad JSON from app:", event.data);
+        console.error("[MyBot Bridge] Bad JSON from app:", event.data);
         return;
       }
 
       // Process the command asynchronously but CATCH all errors
       processMessage(msg).catch((err) => {
-        console.error("[AI Bridge] processMessage error:", err);
+        console.error("[MyBot Bridge] processMessage error:", err);
         safeSend({ id: msg.id, success: false, error: String(err) });
       });
     };
@@ -147,18 +147,18 @@ function connect() {
       clearInterval(pingTimer);
       pingTimer = null;
       stopSelfKeepAlive();
-      console.log("[AI Bridge] Disconnected — will retry in", reconnectDelay, "ms");
+      console.log("[MyBot Bridge] Disconnected — will retry in", reconnectDelay, "ms");
       setTimeout(connect, reconnectDelay);
       // Exponential backoff (capped)
       reconnectDelay = Math.min(reconnectDelay * 1.5, RECONNECT_MAX_DELAY_MS);
     };
 
     ws.onerror = (err) => {
-      console.error("[AI Bridge] WebSocket error:", err);
+      console.error("[MyBot Bridge] WebSocket error:", err);
       try { if (ws) ws.close(); } catch (_) {}
     };
   } catch (e) {
-    console.error("[AI Bridge] connect() error:", e);
+    console.error("[MyBot Bridge] connect() error:", e);
     setTimeout(connect, reconnectDelay);
     reconnectDelay = Math.min(reconnectDelay * 1.5, RECONNECT_MAX_DELAY_MS);
   }
@@ -170,7 +170,7 @@ function safeSend(obj) {
       ws.send(JSON.stringify(obj));
     }
   } catch (e) {
-    console.error("[AI Bridge] safeSend error:", e);
+    console.error("[MyBot Bridge] safeSend error:", e);
   }
 }
 
@@ -215,7 +215,7 @@ async function handleCommand(msg) {
       default:              return { success: false, error: `Unknown command: ${command}` };
     }
   } catch (e) {
-    console.error("[AI Bridge] handleCommand error for", command, ":", e);
+    console.error("[MyBot Bridge] handleCommand error for", command, ":", e);
     return { success: false, error: String(e) };
   }
 }

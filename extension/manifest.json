@@ -1,30 +1,25 @@
 {
   "manifest_version": 3,
-  "name": "AI Browser Bridge",
+  "name": "MyBot Bridge",
   "version": "1.1.0",
-  "description": "Bridges your Chrome browser to the AI Browser dock app via WebSocket.",
-  "permissions": [
-    "tabs",
-    "scripting",
-    "alarms",
-    "windows"
-  ],
-  "host_permissions": [
-    "<all_urls>"
-  ],
-  "background": {
-    "service_worker": "background.js"
+  "description": "Bridges your Chrome browser to the MyBot dock app via WebSocket.",
+  "permissions": ["tabs", "scripting", "alarms", "windows"],
+  "host_permissions": ["<all_urls>"],
+  "icons": {
+    "16": "icon.png",
+    "48": "icon.png",
+    "128": "icon.png"
   },
-  "content_scripts": [
-    {
-      "matches": ["<all_urls>"],
-      "js": ["keepalive.js"],
-      "run_at": "document_start",
-      "all_frames": false
-    }
-  ],
+  "background": {"service_worker": "background.js"},
+  "content_scripts": [{
+    "matches": ["<all_urls>"],
+    "js": ["keepalive.js"],
+    "run_at": "document_start",
+    "all_frames": false
+  }],
   "action": {
     "default_popup": "popup.html",
-    "default_title": "AI Browser Bridge"
+    "default_title": "MyBot Bridge",
+    "default_icon": "icon.png"
   }
 }

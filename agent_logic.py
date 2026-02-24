@@ -4,6 +4,8 @@ agent_logic.py — Browser-Use Agent Worker
 Runs the browser-use Agent + ChatOllama in a QThread so the GUI never blocks.
 Emits Qt signals for real-time status, results, and errors.
 
+Created by AJ (Ahmed Jouini).
+
 Two browser modes:
   • Chromium (default): persistent Chromium via Playwright + browser-use
   • Chrome Extension: drives the user's real Chrome via the WebSocket bridge

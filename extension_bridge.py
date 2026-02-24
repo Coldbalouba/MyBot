@@ -1,7 +1,7 @@
 """
-extension_bridge.py — Chrome Extension WebSocket Bridge
-========================================================
-Runs a lightweight WebSocket server that the AI Browser Bridge Chrome
+extension_bridge.py — MyBot Chrome Extension WebSocket Bridge
+=============================================================
+Runs a lightweight WebSocket server that the MyBot Chrome
 extension connects to.  Provides a thread-safe async API so any thread
 (e.g. the AgentWorker) can send commands to Chrome and await results.
 

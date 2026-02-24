@@ -10,9 +10,9 @@ chrome.runtime.sendMessage({ type: "get_status" }, (resp) => {
 
   if (resp.connected) {
     dot.className = "dot on";
-    label.textContent = "Connected to AI Browser";
+    label.textContent = "Connected to MyBot";
   } else {
     dot.className = "dot off";
-    label.textContent = "Waiting for dock app…";
+    label.textContent = "Waiting for MyBot…";
   }
 });

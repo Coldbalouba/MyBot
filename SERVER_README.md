@@ -1,6 +1,8 @@
-# AI Browser — Server Mode
+# MyBot — Server Mode
 
-Run the AI Browser as a headless API server for remote clients (Android, web, free VPS).
+Run MyBot as a headless API server for remote clients (Android, web, free VPS).
+
+**Created by AJ (Ahmed Jouini)**
 
 **See [README.md](README.md) for full setup guide, troubleshooting, and desktop app help.**
 

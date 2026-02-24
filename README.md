@@ -1,6 +1,8 @@
-# AI Browser
+# MyBot
 
 A desktop dock that lets you control your browser with natural language. Uses AI (Ollama, Google Gemini, Groq, OpenRouter, or OpenCode Zen) to navigate, fill forms, click buttons, and extract info. Supports built-in Chromium or your own Chrome via extension.
+
+**Created by AJ (Ahmed Jouini)**
 
 ---
 
@@ -332,7 +334,7 @@ Ollama does not run on Android. Use server mode + OpenCode:
 ## Project Structure
 
 ```
-ai-browser/
+mybot/
 ├── main.py           # Desktop dock (PyQt6)
 ├── server.py         # Headless API server (FastAPI)
 ├── agent_logic.py    # Browser automation + LLM
@@ -348,3 +350,7 @@ ai-browser/
 ## License
 
 See project license file.
+
+---
+
+*MyBot — Created by AJ (Ahmed Jouini)*

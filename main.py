@@ -1,13 +1,16 @@
 """
-main.py — AI Browser Dock Interface
-=====================================
+main.py — MyBot Dock Interface
+==============================
 A frameless, always-on-top dock bar that sits at the bottom of the screen.
 Styled with a Cyberpunk aesthetic (dark navy, neon cyan/blue accents).
 Features: model selector, Chrome Extension bridge, persistent settings, shortcuts.
+
+Created by AJ (Ahmed Jouini).
 """
 
 import os
 import sys
+from pathlib import Path
 import gc
 import traceback
 
@@ -24,6 +27,7 @@ from PyQt6.QtGui import (
     QGuiApplication,
     QFont,
     QColor,
+    QIcon,
     QShortcut,
     QKeySequence,
     QTextCursor,
@@ -805,8 +809,8 @@ def get_theme_colors(theme: str) -> dict:
 # ║                         SETTINGS CONSTANTS                                  ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
-SETTINGS_ORG = "AIBrowser"
-SETTINGS_APP = "AIDock"
+SETTINGS_ORG = "MyBot"
+SETTINGS_APP = "MyBot"
 DEFAULT_MODEL = "minicpm-v"
 DEFAULT_RAM_THRESHOLD = 85
 
@@ -1052,10 +1056,10 @@ class CornerBubble(QPushButton):
     def __init__(self, dock: "DockWindow", parent=None):
         super().__init__(parent)
         self._dock = dock
-        self.setText("AI")
+        self.setText("MB")
         self.setFixedSize(CORNER_BUBBLE_SIZE, CORNER_BUBBLE_SIZE)
         self.setCursor(Qt.CursorShape.PointingHandCursor)
-        self.setToolTip("Click to restore AI Browser")
+        self.setToolTip("Click to restore MyBot")
         self.setWindowFlags(
             Qt.WindowType.FramelessWindowHint
             | Qt.WindowType.WindowStaysOnTopHint
@@ -1148,6 +1152,10 @@ class DockWindow(QWidget):
     def _setup_window(self):
         self.setObjectName("DockContainer")
         self.setStyleSheet(get_stylesheet(self.theme))
+
+        icon_path = Path(__file__).parent / "assets" / "icon.png"
+        if icon_path.exists():
+            self.setWindowIcon(QIcon(str(icon_path)))
 
         self.setWindowFlags(
 
@@ -1992,6 +2000,9 @@ def main():
     app.setFont(QFont("Segoe UI", 10))
     app.setOrganizationName(SETTINGS_ORG)
     app.setApplicationName(SETTINGS_APP)
+    icon_path = Path(__file__).parent / "assets" / "icon.png"
+    if icon_path.exists():
+        app.setWindowIcon(QIcon(str(icon_path)))
 
     dock = DockWindow()
     _dock_ref = dock

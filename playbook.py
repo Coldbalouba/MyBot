@@ -4,6 +4,8 @@ playbook.py — Playbook Recording, Storage, Matching & Replay
 Records successful browser automation sequences and replays them
 for similar future tasks, dramatically reducing LLM API costs.
 
+Created by AJ (Ahmed Jouini).
+
 Architecture:
   • PlaybookStore     – Persistence layer: save / load / search playbooks as JSON.
   • PlaybookRecorder  – Captures actions from a successful AgentHistoryList.

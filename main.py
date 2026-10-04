@@ -45,7 +45,6 @@ from PyQt6.QtWidgets import (
     QDialog,
     QFormLayout,
     QSpinBox,
-    QCheckBox,
     QDialogButtonBox,
     QGraphicsDropShadowEffect,
 )
@@ -53,8 +52,6 @@ from agent_logic import (
     AgentWorker,
     ModelFetchWorker,
     ModelWarmupWorker,
-    ExtensionProbeWorker,
-    BrowserSession,
     ModelPool,
     PROVIDER_OLLAMA,
     PROVIDER_OPENCODE,
@@ -63,7 +60,6 @@ from agent_logic import (
     PROVIDER_GROQ,
 )
 from extension_bridge import ExtensionBridge, DEFAULT_WS_PORT
-from playbook import PlaybookStore
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -263,28 +259,6 @@ QComboBox#ModelSelector QAbstractItemView {
     selection-background-color: rgba(0, 212, 255, 0.2);
     selection-color: #00d4ff;
     font-size: 11px;
-}
-
-/* ─── Browser Mode Toggle ─────────────────────────────────────────────────── */
-
-QPushButton#BrowserToggle {
-    font-size: 11px;
-    min-width: 50px;
-    max-width: 100px;
-    padding: 4px 8px;
-    border-radius: 6px;
-}
-
-QPushButton#BrowserToggle[active="true"] {
-    background-color: rgba(76, 175, 80, 0.15);
-    border-color: rgba(76, 175, 80, 0.5);
-    color: #4CAF50;
-}
-
-QPushButton#BrowserToggle[active="false"] {
-    background-color: rgba(0, 212, 255, 0.06);
-    border-color: rgba(0, 212, 255, 0.2);
-    color: #666688;
 }
 
 /* ─── Minimize / Exit buttons ──────────────────────────────────────────────── */
@@ -622,28 +596,6 @@ QComboBox#ModelSelector QAbstractItemView {
     font-size: 11px;
 }
 
-/* ─── Browser Mode Toggle ─────────────────────────────────────────────────── */
-
-QPushButton#BrowserToggle {
-    font-size: 11px;
-    min-width: 50px;
-    max-width: 100px;
-    padding: 4px 8px;
-    border-radius: 6px;
-}
-
-QPushButton#BrowserToggle[active="true"] {
-    background-color: rgba(76, 175, 80, 0.15);
-    border-color: rgba(76, 175, 80, 0.6);
-    color: #2e7d32;
-}
-
-QPushButton#BrowserToggle[active="false"] {
-    background-color: rgba(0, 119, 182, 0.06);
-    border-color: rgba(0, 119, 182, 0.25);
-    color: #6c757d;
-}
-
 /* ─── Minimize / Exit buttons ──────────────────────────────────────────────── */
 
 QPushButton#MinimizeBtn {
@@ -820,13 +772,11 @@ DEFAULT_RAM_THRESHOLD = 85
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 class SettingsDialog(QDialog):
-    """Pop-up dialog for RAM threshold, playbooks, API keys, theme, and other preferences."""
+    """Pop-up dialog for RAM threshold, API keys, theme, and other preferences."""
 
     def __init__(
         self,
         ram_threshold: int,
-        use_playbooks: bool = True,
-        playbook_count: int = 0,
         opencode_api_key: str = "",
         openrouter_api_key: str = "",
         google_api_key: str = "",
@@ -845,35 +795,6 @@ class SettingsDialog(QDialog):
         layout = QFormLayout(self)
         layout.setSpacing(14)
         layout.setContentsMargins(28, 24, 28, 24)
-
-        # ── Playbooks section ─────────────────────────────────────────────
-        playbook_header = QLabel("PLAYBOOKS")
-        playbook_header.setStyleSheet(
-            f"color: {self._colors['accent']}; font-size: 10px; font-weight: 700; "
-            "letter-spacing: 2px; padding-top: 4px;"
-        )
-        layout.addRow(playbook_header)
-
-        self.playbooks_checkbox = QCheckBox(
-            f"Enable playbook learning  ({playbook_count} saved)"
-        )
-        self.playbooks_checkbox.setChecked(use_playbooks)
-        self.playbooks_checkbox.setToolTip(
-            "When enabled, successful tasks are recorded and replayed\n"
-            "for similar future requests — saving time and API costs."
-        )
-        self.playbooks_checkbox.setStyleSheet(f"color: {self._colors['muted']}; font-size: 12px;")
-        layout.addRow(self.playbooks_checkbox)
-
-        self.clear_playbooks_btn = QPushButton(f"Clear All Playbooks ({playbook_count})")
-        self.clear_playbooks_btn.setToolTip("Delete all saved playbooks")
-        self.clear_playbooks_btn.setStyleSheet(
-            "color: #ff6677; border-color: rgba(255, 68, 119, 0.3); "
-            "font-size: 11px; padding: 6px 12px;"
-        )
-        self._playbooks_cleared = False
-        self.clear_playbooks_btn.clicked.connect(self._on_clear_playbooks)
-        layout.addRow("", self.clear_playbooks_btn)
 
         # ── OpenCode Zen section ───────────────────────────────────────────
         opencode_header = QLabel("OPENCODE ZEN")
@@ -993,19 +914,6 @@ class SettingsDialog(QDialog):
         btn_box.rejected.connect(self.reject)
         layout.addRow(btn_box)
 
-    def _on_clear_playbooks(self):
-        """Clear all saved playbooks."""
-        try:
-            store = PlaybookStore()
-            for entry in store.list_all():
-                store.delete(entry["id"])
-            self._playbooks_cleared = True
-            self.clear_playbooks_btn.setText("✓ Cleared!")
-            self.clear_playbooks_btn.setEnabled(False)
-            self.playbooks_checkbox.setText("Enable playbook learning  (0 saved)")
-        except Exception as e:
-            self.clear_playbooks_btn.setText(f"Error: {e}")
-
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                          DOCK WINDOW (MAIN UI)                              ║
@@ -1090,8 +998,8 @@ class CornerBubble(QPushButton):
 class DockWindow(QWidget):
     """
     Frameless dock bar pinned to the bottom of the primary screen.
-    Contains a prompt input, model selector, browser mode toggle (Chromium /
-    Chrome Extension), control buttons, a collapsible log pane, RAM monitor,
+    Contains a prompt input, model selector, Chrome extension status,
+    control buttons, a collapsible log pane, RAM monitor,
     and wires up to the AgentWorker thread.
     """
 
@@ -1102,8 +1010,6 @@ class DockWindow(QWidget):
         self._settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self.model_name = self._settings.value("model_name", DEFAULT_MODEL, str)
         self.ram_threshold = self._settings.value("ram_threshold", DEFAULT_RAM_THRESHOLD, int)
-        self.use_playbooks = self._settings.value("use_playbooks", True, bool)
-        self.use_extension = self._settings.value("use_extension", False, bool)
         self.custom_guidelines = self._settings.value("custom_guidelines", "", str)
         p = self._settings.value("provider", PROVIDER_OLLAMA, str)
         self.provider = str(p or "").lower().strip() or PROVIDER_OLLAMA
@@ -1119,7 +1025,6 @@ class DockWindow(QWidget):
         self._agent_worker: AgentWorker | None = None
         self._model_fetch_worker: ModelFetchWorker | None = None
         self._model_warmup_worker: ModelWarmupWorker | None = None
-        self._ext_probe_worker: ExtensionProbeWorker | None = None
         self._log_visible = False
         self._current_anim = None
         self._ext_connected = False
@@ -1234,24 +1139,11 @@ class DockWindow(QWidget):
 
         bar_layout.addWidget(self._make_sep(1, 24))
 
-        # ── Browser mode toggle ───────────────────────────────────────────
-        self.browser_toggle_btn = QPushButton("Chromium")
-        self.browser_toggle_btn.setObjectName("BrowserToggle")
-        self.browser_toggle_btn.setToolTip(
-            "Toggle between built-in Chromium and your Chrome (via extension)"
-        )
-        self.browser_toggle_btn.setCheckable(True)
-        self.browser_toggle_btn.setChecked(self.use_extension)
-        self.browser_toggle_btn.clicked.connect(self._on_browser_toggle)
-        self._update_browser_toggle_style()
-        bar_layout.addWidget(self.browser_toggle_btn)
-
         # Extension status dot
         self.ext_status_label = QLabel("●")
         self.ext_status_label.setObjectName("ExtStatus")
         self.ext_status_label.setToolTip("Extension connection status")
         self._update_ext_status_display(False, "Not connected")
-        self.ext_status_label.setVisible(self.use_extension)
         bar_layout.addWidget(self.ext_status_label)
 
         # Install extension button
@@ -1263,7 +1155,6 @@ class DockWindow(QWidget):
             QPushButton { min-width: 32px; max-width: 32px; padding: 0; font-size: 14px; }
         """)
         self.ext_install_btn.clicked.connect(self._on_install_extension)
-        self.ext_install_btn.setVisible(self.use_extension)
         bar_layout.addWidget(self.ext_install_btn)
 
         bar_layout.addWidget(self._make_sep(1, 24))
@@ -1447,33 +1338,6 @@ class DockWindow(QWidget):
     # ║                  CHROME EXTENSION CONTROLS                         ║
     # ╚══════════════════════════════════════════════════════════════════════╝
 
-    def _on_browser_toggle(self):
-        """Toggle between built-in Chromium and Chrome Extension mode."""
-        self.use_extension = self.browser_toggle_btn.isChecked()
-        self._settings.setValue("use_extension", self.use_extension)
-        self._update_browser_toggle_style()
-
-        # Show/hide extension-related controls
-        self.ext_status_label.setVisible(self.use_extension)
-        self.ext_install_btn.setVisible(self.use_extension)
-
-        if self.use_extension:
-            self._probe_extension()
-            self._log(
-                "🔌  Switched to Chrome Extension mode — "
-                "drives your own Chrome via the bridge extension"
-            )
-        else:
-            self._log("🌐  Switched to built-in Chromium mode — launches fresh Chromium")
-
-    def _update_browser_toggle_style(self):
-        active = "true" if self.use_extension else "false"
-        text = "🔌 Chrome" if self.use_extension else "🌐 Chromium"
-        self.browser_toggle_btn.setText(text)
-        self.browser_toggle_btn.setProperty("active", active)
-        self.browser_toggle_btn.style().unpolish(self.browser_toggle_btn)
-        self.browser_toggle_btn.style().polish(self.browser_toggle_btn)
-
     def _update_ext_status_display(self, connected: bool, tooltip: str):
         self._ext_connected = connected
         if connected:
@@ -1526,7 +1390,7 @@ class DockWindow(QWidget):
             self._ext_last_log_state = state
             if state:
                 self._log("🟢  Chrome extension connected!")
-            elif self.use_extension:
+            else:
                 self._log("🔴  Chrome extension disconnected")
 
     def _probe_extension(self):
@@ -1725,8 +1589,7 @@ class DockWindow(QWidget):
             self._log("⚠️  Agent is already running — stop it first.")
             return
 
-        # Pre-flight check for extension mode
-        if self.use_extension and not self._bridge.connected:
+        if not self._bridge.connected:
             self._log(
                 "❌  Chrome extension is not connected!\n"
                 "    Click the 📦 button to install the extension first."
@@ -1735,10 +1598,9 @@ class DockWindow(QWidget):
                 self._toggle_log()
             return
 
-        mode_label = "🔌 Chrome Extension" if self.use_extension else "🌐 Built-in Chromium"
         self._log(f"\n{'━' * 60}")
         self._log(f"📝  > {task}")
-        self._log(f"🤖  Model: {self.model_name}  |  Browser: {mode_label}")
+        self._log(f"🤖  Model: {self.model_name}  ")
         self._log(f"{'━' * 60}")
         self.prompt_input.clear()
         self.prompt_input.setEnabled(False)
@@ -1749,15 +1611,10 @@ class DockWindow(QWidget):
         if not self._log_visible:
             self._toggle_log()
 
-        geo = self._screen_geo
         self._agent_worker = AgentWorker(
             task=task,
-            screen_width=geo.width(),
-            screen_height=geo.height(),
             model_name=self.model_name,
-            use_extension=self.use_extension,
-            extension_bridge=self._bridge if self.use_extension else None,
-            use_playbooks=self.use_playbooks,
+            extension_bridge=self._bridge,
             custom_guidelines=self.custom_guidelines,
             provider=self.provider,
             opencode_api_key=self.opencode_api_key,
@@ -1788,13 +1645,8 @@ class DockWindow(QWidget):
         self._corner_bubble.set_theme(theme)
 
     def _on_settings(self):
-        store = PlaybookStore()
-        playbook_count = len(store.list_all())
-
         dlg = SettingsDialog(
             ram_threshold=self.ram_threshold,
-            use_playbooks=self.use_playbooks,
-            playbook_count=playbook_count,
             opencode_api_key=self.opencode_api_key,
             openrouter_api_key=self.openrouter_api_key,
             google_api_key=self.google_api_key,
@@ -1805,9 +1657,6 @@ class DockWindow(QWidget):
         if dlg.exec() == QDialog.DialogCode.Accepted:
             self.ram_threshold = dlg.ram_spin.value()
             self._settings.setValue("ram_threshold", self.ram_threshold)
-
-            self.use_playbooks = dlg.playbooks_checkbox.isChecked()
-            self._settings.setValue("use_playbooks", self.use_playbooks)
 
             self.opencode_api_key = dlg.opencode_key_edit.text().strip()
             self._settings.setValue("opencode_api_key", self.opencode_api_key)
@@ -1827,14 +1676,7 @@ class DockWindow(QWidget):
                 self._settings.setValue("theme", self.theme)
                 self._apply_theme(self.theme)
 
-            pb_status = "ON" if self.use_playbooks else "OFF"
-            if dlg._playbooks_cleared:
-                pb_status += " (cleared)"
-
-            self._log(
-                f"⚙️  Settings updated  ▸  RAM = {self.ram_threshold}%"
-                f"  ▸  Playbooks = {pb_status}"
-            )
+            self._log(f"⚙️  Settings updated  ▸  RAM = {self.ram_threshold}%")
 
     def _on_help(self):
         """Open the README / help guide in the default app."""
@@ -1961,9 +1803,6 @@ class DockWindow(QWidget):
         self._ram_timer.stop()
         self._pulse_timer.stop()
         self._ext_timer.stop()
-
-        # Kill the persistent Chromium browser (if any)
-        BrowserSession.shutdown()
 
         # Shut down the WebSocket bridge (frees the port)
         self._bridge.stop()

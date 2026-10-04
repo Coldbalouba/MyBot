@@ -293,24 +293,23 @@ async function cmdScreenshot() {
       const strips = [];
       let scrollY = 0;
       while (scrollY < docH) {
-          try {
-            const dataUrl = await chrome.tabs.captureVisibleTab(win.id, { format: "png" });
-            strips.push(dataUrl);
-          } catch (e) {
-            if (String(e).includes("activeTab") || String(e).includes("Cannot access")) {
-              return { success: false, error: String(e) + " (try navigating to a regular web page first)" };
-            }
-            throw e;
+        try {
+          const dataUrl = await chrome.tabs.captureVisibleTab(win.id, { format: "png" });
+          strips.push(dataUrl);
+        } catch (e) {
+          if (String(e).includes("activeTab") || String(e).includes("Cannot access")) {
+            return { success: false, error: String(e) + " (try navigating to a regular web page first)" };
           }
-          scrollY += vh;
-          if (scrollY < docH) {
-            await chrome.scripting.executeScript({
-              target: { tabId: tab.id },
-              func: (y) => { window.scrollTo(0, y); },
-              args: [scrollY],
-            });
-            await sleep(400);
-          }
+          throw e;
+        }
+        scrollY += vh;
+        if (scrollY < docH) {
+          await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            func: (y) => { window.scrollTo(0, y); },
+            args: [scrollY],
+          });
+          await sleep(400);
         }
       }
 

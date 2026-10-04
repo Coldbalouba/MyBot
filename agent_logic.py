@@ -49,6 +49,14 @@ PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_GOOGLE = "google"
 PROVIDER_GROQ = "groq"
 
+_PROVIDER_LABELS = {
+    PROVIDER_OLLAMA: "Ollama",
+    PROVIDER_GOOGLE: "Google Gemini",
+    PROVIDER_GROQ: "Groq",
+    PROVIDER_OPENROUTER: "OpenRouter",
+    PROVIDER_OPENCODE: "OpenCode Zen",
+}
+
 # Google Gemini (API key at aistudio.google.com/app/apikey)
 GOOGLE_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
 GOOGLE_MODELS_URL = f"{GOOGLE_GEMINI_BASE}/models"
@@ -1257,6 +1265,7 @@ class AgentWorker(QThread):
         openrouter_api_key: str = "",
         google_api_key: str = "",
         groq_api_key: str = "",
+        fallback_models: list[tuple[str, str]] | None = None,
         parent=None,
     ):
         super().__init__(parent)
@@ -1272,10 +1281,28 @@ class AgentWorker(QThread):
         self.openrouter_api_key = (openrouter_api_key or "").strip()
         self.google_api_key = (google_api_key or "").strip()
         self.groq_api_key = (groq_api_key or "").strip()
+        # Priority list of (slot number, provider, model); slot 1 is the primary model.
+        self.model_chain: list[tuple[int, str, str]] = [(1, self.provider, self.model_name)]
+        for slot, (fb_provider, fb_model) in enumerate(fallback_models or [], start=2):
+            fb_provider = str(fb_provider or "").lower().strip()
+            fb_model = str(fb_model or "").strip()
+            if fb_provider in valid and fb_model:
+                self.model_chain.append((slot, fb_provider, fb_model))
         self._stop_requested = False
 
     def request_stop(self):
         self._stop_requested = True
+
+    async def _check_provider(self, provider: str) -> tuple[bool, str]:
+        if provider == PROVIDER_OPENCODE:
+            return await check_opencode_accessible(self.opencode_api_key)
+        if provider == PROVIDER_OPENROUTER:
+            return await check_openrouter_accessible(self.openrouter_api_key)
+        if provider == PROVIDER_GOOGLE:
+            return await check_google_accessible(self.google_api_key)
+        if provider == PROVIDER_GROQ:
+            return await check_groq_accessible(self.groq_api_key)
+        return await check_ollama_running()
 
     # ── Thread entry point ────────────────────────────────────────────────
 
@@ -1336,62 +1363,34 @@ class AgentWorker(QThread):
                 )
                 return
 
-        # ── Check backend (Ollama, OpenCode, or OpenRouter) ───────────────
-        if self.provider == PROVIDER_OPENCODE:
-            self.status_update.emit("🔍  Checking OpenCode Zen connectivity…")
-            ok, msg = await check_opencode_accessible(self.opencode_api_key)
-            if not ok:
-                self.error_occurred.emit(f"OpenCode Zen not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        elif self.provider == PROVIDER_OPENROUTER:
-            self.status_update.emit("🔍  Checking OpenRouter connectivity…")
-            ok, msg = await check_openrouter_accessible(self.openrouter_api_key)
-            if not ok:
-                self.error_occurred.emit(f"OpenRouter not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        elif self.provider == PROVIDER_GOOGLE:
-            self.status_update.emit("🔍  Checking Google Gemini connectivity…")
-            ok, msg = await check_google_accessible(self.google_api_key)
-            if not ok:
-                self.error_occurred.emit(f"Google Gemini not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        elif self.provider == PROVIDER_GROQ:
-            self.status_update.emit("🔍  Checking Groq connectivity…")
-            ok, msg = await check_groq_accessible(self.groq_api_key)
-            if not ok:
-                self.error_occurred.emit(f"Groq not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        else:
-            self.status_update.emit("🔍  Checking Ollama connectivity…")
-            ok, msg = await check_ollama_running()
-            if not ok:
-                self.error_occurred.emit(f"Ollama not available:\n{msg}")
-                return
+        # ── Check each model's backend; keep the reachable ones in priority order ──
+        reachable: list[tuple[int, str, str]] = []
+        failures: list[str] = []
+        for slot, provider, model in self.model_chain:
+            label = f"Model {slot} ({_PROVIDER_LABELS.get(provider, provider)} / {model})"
+            self.status_update.emit(f"🔍  Checking {label}…")
+            ok, msg = await self._check_provider(provider)
+            if ok:
+                reachable.append((slot, provider, model))
+                if msg:
+                    self.status_update.emit(f"  ↳ {msg}")
+            else:
+                failures.append(f"{label}: {msg}")
+                self.status_update.emit(f"  ↳ ⚠️  Skipping — {msg}")
+        if not reachable:
+            self.error_occurred.emit("No configured model is available:\n" + "\n".join(failures))
+            return
+        self.model_chain = reachable
+        active = 0
+        _, self.provider, self.model_name = self.model_chain[active]
 
         self.status_update.emit(f'🧠  Task: "{self.task}"')
-        prov_label = {
-            PROVIDER_GOOGLE: "Google Gemini",
-            PROVIDER_GROQ: "Groq",
-            PROVIDER_OPENROUTER: "OpenRouter",
-            PROVIDER_OPENCODE: "OpenCode Zen",
-            PROVIDER_OLLAMA: "Ollama",
-        }.get(self.provider, self.provider)
-        self.status_update.emit(f"⚡  Provider: {prov_label}  |  Model: {self.model_name}  |  Mode: Chrome Extension")
+        chain_desc = "  →  ".join(
+            f"{slot}. {_PROVIDER_LABELS.get(p, p)} / {m}" for slot, p, m in self.model_chain
+        )
+        self.status_update.emit(f"⚡  Models: {chain_desc}  |  Mode: Chrome Extension")
 
-        # LLM client: OpenCode, OpenRouter, Google, Groq, or Ollama
-        use_opencode = self.provider == PROVIDER_OPENCODE
-        use_openrouter = self.provider == PROVIDER_OPENROUTER
-        use_google = self.provider == PROVIDER_GOOGLE
-        use_groq = self.provider == PROVIDER_GROQ
         ollama_client = None
-        if use_opencode or use_openrouter or use_google or use_groq:
-            pass  # use provider-specific chat stream
-        else:
-            ollama_client = ollama_lib.AsyncClient(host=OLLAMA_BASE_URL)
 
         def _ollama_to_openai_messages(msgs: list) -> list:
             """Convert Ollama-style messages (with images) to OpenAI format."""
@@ -1412,53 +1411,51 @@ class AgentWorker(QThread):
                     out.append({"role": role, "content": content})
             return out
 
-        async def _chat_stream(messages: list) -> str:
-            """Stream chat and return full text. Uses OpenCode, OpenRouter, or Ollama."""
+        async def _chat_once(provider: str, model: str, messages: list) -> str:
+            nonlocal ollama_client
+            on_token = lambda t: self.token_stream.emit(t)  # noqa: E731
+            if provider == PROVIDER_OPENCODE:
+                return await opencode_chat_stream(model, messages, self.opencode_api_key, on_token=on_token)
+            if provider == PROVIDER_OPENROUTER:
+                return await openrouter_chat_stream(model, messages, self.openrouter_api_key, on_token=on_token)
+            if provider == PROVIDER_GOOGLE:
+                return await google_chat_stream(model, messages, self.google_api_key, on_token=on_token)
+            if provider == PROVIDER_GROQ:
+                return await groq_chat_stream(model, messages, self.groq_api_key, on_token=on_token)
+            if ollama_client is None:
+                ollama_client = ollama_lib.AsyncClient(host=OLLAMA_BASE_URL)
             full_text = ""
-            if use_opencode:
-                full_text = await opencode_chat_stream(
-                    self.model_name,
-                    messages,
-                    self.opencode_api_key,
-                    on_token=lambda t: self.token_stream.emit(t),
-                )
-            elif use_openrouter:
-                full_text = await openrouter_chat_stream(
-                    self.model_name,
-                    messages,
-                    self.openrouter_api_key,
-                    on_token=lambda t: self.token_stream.emit(t),
-                )
-            elif use_google:
-                full_text = await google_chat_stream(
-                    self.model_name,
-                    messages,
-                    self.google_api_key,
-                    on_token=lambda t: self.token_stream.emit(t),
-                )
-            elif use_groq:
-                full_text = await groq_chat_stream(
-                    self.model_name,
-                    messages,
-                    self.groq_api_key,
-                    on_token=lambda t: self.token_stream.emit(t),
-                )
-            else:
-                stream = await ollama_client.chat(
-                    model=self.model_name,
-                    messages=messages,
-                    stream=True,
-                )
-                async for chunk in stream:
-                    content = ""
-                    if hasattr(chunk, "message"):
-                        content = getattr(chunk.message, "content", "")
-                    elif isinstance(chunk, dict):
-                        content = chunk.get("message", {}).get("content", "")
-                    if content:
-                        full_text += content
-                        self.token_stream.emit(content)
+            stream = await ollama_client.chat(model=model, messages=messages, stream=True)
+            async for chunk in stream:
+                content = ""
+                if hasattr(chunk, "message"):
+                    content = getattr(chunk.message, "content", "")
+                elif isinstance(chunk, dict):
+                    content = chunk.get("message", {}).get("content", "")
+                if content:
+                    full_text += content
+                    on_token(content)
             return full_text
+
+        async def _chat_stream(messages: list) -> str:
+            """Stream chat on the active model; on failure fall back to the next model in priority order."""
+            nonlocal active
+            while True:
+                slot, provider, model = self.model_chain[active]
+                try:
+                    return await _chat_once(provider, model, messages)
+                except Exception as e:
+                    if self._stop_requested or active + 1 >= len(self.model_chain):
+                        raise
+                    active += 1
+                    next_slot, next_provider, next_model = self.model_chain[active]
+                    self.provider, self.model_name = next_provider, next_model
+                    self.status_update.emit(
+                        f"⚠️  Model {slot} ({_PROVIDER_LABELS.get(provider, provider)} / {model}) failed: "
+                        f"{str(e)[:200]}\n"
+                        f"↪️  Falling back to Model {next_slot} "
+                        f"({_PROVIDER_LABELS.get(next_provider, next_provider)} / {next_model})"
+                    )
 
         action_history: list[str] = []        # human-readable log per step
         action_signatures: list[str] = []     # exact action fingerprints for loop detection

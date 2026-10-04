@@ -15,6 +15,21 @@ python main.py
 
 Then load the Chrome extension (see [Chrome Extension Setup](#6-chrome-extension-setup)). Type a task in the dock bar (e.g. *"Search for coffee makers on Amazon"*) and press Enter. Switch providers and models from the dock dropdowns — only models usable for browser automation (vision + chat) are shown. No restart needed.
 
+### Model priority (fallback) and API keys
+
+Open ⚙ Settings → **Model priority** to pick a provider and model for **Model 1**, **Model 2** and **Model 3** (↻ loads the provider's model list). Model 1 is used first; if it fails (error, rate limit, bad key, provider down), MyBot automatically continues the same task on Model 2, then Model 3. Models whose provider isn't reachable at start are skipped. The dock dropdowns always show Model 1.
+
+API keys are read automatically from a `.env` file next to `main.py` (it is git-ignored):
+
+```
+OPENROUTER_API_KEY=...
+GOOGLE_API_KEY=...        # or GEMINI_API_KEY
+GROQ_API_KEY=...
+OPENCODE_API_KEY=...
+```
+
+Any key you type in ⚙ Settings overrides the `.env` value; clear the field to go back to `.env`.
+
 ---
 
 ## Setup Guide

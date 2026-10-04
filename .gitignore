@@ -31,9 +31,3 @@ Desktop.ini
 
 # Logs
 *.log
-
-# Playbooks (user-specific recorded sessions)
-playbooks/
-
-# CDP Chrome sandbox (copied profile data)
-cdp_chrome_profile/

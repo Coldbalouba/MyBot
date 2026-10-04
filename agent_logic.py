@@ -1,18 +1,15 @@
 """
-agent_logic.py — Browser-Use Agent Worker
-==========================================
-Runs the browser-use Agent + ChatOllama in a QThread so the GUI never blocks.
+agent_logic.py — Chrome Extension Agent Worker
+==============================================
+Runs the vision agent loop in a QThread so the GUI never blocks.
 Emits Qt signals for real-time status, results, and errors.
 
 Created by AJ (Ahmed Jouini).
 
-Two browser modes:
-  • Chromium (default): persistent Chromium via Playwright + browser-use
-  • Chrome Extension: drives the user's real Chrome via the WebSocket bridge
+Drives the user's real Chrome via the MyBot Bridge extension (WebSocket).
 
 Key improvements:
   • Async HTTP (httpx) — no blocking requests in async contexts
-  • Persistent browser session — Chromium survives across tasks (~2s saved per run)
   • LLM token streaming — real-time token display in the log pane
   • Smart screenshot downscaling — reduces vision inference time by 60-80%
   • Model pre-warming — eliminates cold-start latency on first task
@@ -20,7 +17,6 @@ Key improvements:
 
 import asyncio
 import base64
-import gc
 import io
 import json
 import logging
@@ -44,8 +40,6 @@ SYSTEM_INSTRUCTION = (
     "Keep exploring alternative strategies until the task is complete."
 )
 
-MAX_RETRIES = 3
-RETRY_DELAY_SECONDS = 3
 OLLAMA_BASE_URL = "http://127.0.0.1:11434"
 
 # AI Providers
@@ -54,6 +48,14 @@ PROVIDER_OPENCODE = "opencode"
 PROVIDER_OPENROUTER = "openrouter"
 PROVIDER_GOOGLE = "google"
 PROVIDER_GROQ = "groq"
+
+_PROVIDER_LABELS = {
+    PROVIDER_OLLAMA: "Ollama",
+    PROVIDER_GOOGLE: "Google Gemini",
+    PROVIDER_GROQ: "Groq",
+    PROVIDER_OPENROUTER: "OpenRouter",
+    PROVIDER_OPENCODE: "OpenCode Zen",
+}
 
 # Google Gemini (API key at aistudio.google.com/app/apikey)
 GOOGLE_GEMINI_BASE = "https://generativelanguage.googleapis.com/v1beta"
@@ -1094,179 +1096,6 @@ class ModelFetchWorker(QThread):
                 self.fetch_failed.emit(str(e))
 
 
-class ExtensionProbeWorker(QThread):
-    """Pings the Chrome extension via the bridge to check connectivity."""
-    probe_result = pyqtSignal(bool, str)
-
-    def __init__(self, bridge, parent=None):
-        super().__init__(parent)
-        self._bridge = bridge
-
-    def run(self):
-        if not self._bridge or not self._bridge.connected:
-            self.probe_result.emit(False, "Extension not connected")
-            return
-        loop = asyncio.new_event_loop()
-        try:
-            ok = loop.run_until_complete(self._bridge.ping())
-            if ok:
-                self.probe_result.emit(True, "Extension connected")
-            else:
-                self.probe_result.emit(False, "Ping failed")
-        except Exception as e:
-            self.probe_result.emit(False, str(e))
-        finally:
-            loop.close()
-
-
-# ╔══════════════════════════════════════════════════════════════════════════════╗
-# ║                   PERSISTENT BROWSER SESSION                                ║
-# ╚══════════════════════════════════════════════════════════════════════════════╝
-
-class BrowserSession:
-    """
-    Singleton that keeps one Chromium browser alive across agent tasks.
-
-    Owns a persistent asyncio event loop in a daemon thread.  All Playwright
-    work happens on this loop so the browser object is never used across
-    different loops (which Playwright forbids).
-
-    Usage::
-
-        session = BrowserSession.get()
-        future  = session.submit(my_coro())   # schedules on the browser loop
-        result  = future.result()             # blocks calling thread
-    """
-
-    _instance: "BrowserSession | None" = None
-    _lock = threading.Lock()
-
-    def __init__(self):
-        self._loop: asyncio.AbstractEventLoop | None = None
-        self._browser = None
-        self._ready = threading.Event()
-        self._thread = threading.Thread(
-            target=self._run_loop, daemon=True, name="BrowserSessionLoop",
-        )
-        self._thread.start()
-        self._ready.wait(timeout=5)
-
-    # ── Singleton access ──────────────────────────────────────────────────
-
-    @classmethod
-    def get(cls) -> "BrowserSession":
-        with cls._lock:
-            if cls._instance is None:
-                cls._instance = cls()
-            return cls._instance
-
-    @classmethod
-    def shutdown(cls):
-        """Call on app exit to kill the browser and stop the loop."""
-        with cls._lock:
-            inst = cls._instance
-            cls._instance = None
-        if inst is not None:
-            inst._stop()
-
-    # ── Loop lifecycle ────────────────────────────────────────────────────
-
-    def _run_loop(self):
-        self._loop = asyncio.new_event_loop()
-        asyncio.set_event_loop(self._loop)
-        self._ready.set()
-        self._loop.run_forever()
-        # After loop.stop(), clean up browser
-        if self._browser is not None:
-            try:
-                self._loop.run_until_complete(self._kill_browser_internal())
-            except Exception:
-                pass
-        try:
-            self._loop.run_until_complete(self._loop.shutdown_asyncgens())
-        except Exception:
-            pass
-        self._loop.close()
-
-    def _stop(self):
-        if self._loop and self._loop.is_running():
-            self._loop.call_soon_threadsafe(self._loop.stop)
-        if self._thread and self._thread.is_alive():
-            self._thread.join(timeout=5)
-
-    # ── Public API (thread-safe) ──────────────────────────────────────────
-
-    def submit(self, coro):
-        """Schedule *coro* on the browser loop. Returns concurrent.futures.Future."""
-        if self._loop is None or not self._loop.is_running():
-            raise RuntimeError("BrowserSession loop is not running")
-        return asyncio.run_coroutine_threadsafe(coro, self._loop)
-
-    @property
-    def browser_alive(self) -> bool:
-        return self._browser is not None
-
-    # ── Browser management (call from the browser loop only) ──────────────
-
-    async def acquire_browser(self, Browser, screen_width: int, screen_height: int):
-        """Return the existing browser or create a new one."""
-        if self._browser is not None:
-            return self._browser
-        dock_h = 120
-        browser_h = screen_height - dock_h
-        self._browser = Browser(
-            headless=False,
-            keep_alive=True,
-            window_size={"width": screen_width, "height": browser_h},
-            window_position={"width": 0, "height": 0},
-        )
-        return self._browser
-
-    async def reset_for_new_task(self):
-        """Clear cookies and navigate to blank between tasks."""
-        if self._browser is None:
-            return
-        try:
-            await self._browser.clear_cookies()
-        except Exception:
-            pass
-        try:
-            page = await self._browser.get_current_page()
-            if page:
-                await page.goto("about:blank", timeout=5000)
-        except Exception:
-            pass
-        # Close extra tabs
-        try:
-            tabs = await self._browser.get_tabs()
-            if tabs and len(tabs) > 1:
-                for tab in tabs[1:]:
-                    try:
-                        await self._browser.close_page(tab)
-                    except Exception:
-                        pass
-        except Exception:
-            pass
-
-    async def handle_crash(self):
-        """Mark browser as dead so a fresh one is created next acquire."""
-        log.warning("Browser session detected crash — will recreate on next task")
-        try:
-            if self._browser is not None:
-                await self._browser.kill()
-        except Exception:
-            pass
-        self._browser = None
-
-    async def _kill_browser_internal(self):
-        if self._browser is not None:
-            try:
-                await self._browser.kill()
-            except Exception:
-                pass
-            self._browser = None
-
-
 # ╔══════════════════════════════════════════════════════════════════════════════╗
 # ║                      EXTENSION AGENT HELPERS                                ║
 # ╚══════════════════════════════════════════════════════════════════════════════╝
@@ -1410,13 +1239,10 @@ def _data_url_to_raw_b64(data_url: str) -> str:
 
 class AgentWorker(QThread):
     """
-    Background thread that runs browser automation.
+    Background thread that drives Chrome through the extension bridge
+    on its own event loop.
 
-    Chromium mode:  Submits work to the persistent BrowserSession loop
-                    so the browser survives across tasks.
-    Extension mode: Creates its own event loop (no Playwright browser).
-
-    Emits ``token_stream`` for real-time LLM output in both modes.
+    Emits ``token_stream`` for real-time LLM output.
     """
 
     # ── Signals ───────────────────────────────────────────────────────────
@@ -1431,28 +1257,21 @@ class AgentWorker(QThread):
     def __init__(
         self,
         task: str,
-        screen_width: int = 1920,
-        screen_height: int = 1080,
         model_name: str = "minicpm-v",
-        use_extension: bool = False,
         extension_bridge=None,
-        use_playbooks: bool = True,
         custom_guidelines: str = "",
         provider: str = PROVIDER_OLLAMA,
         opencode_api_key: str = "",
         openrouter_api_key: str = "",
         google_api_key: str = "",
         groq_api_key: str = "",
+        fallback_models: list[tuple[str, str]] | None = None,
         parent=None,
     ):
         super().__init__(parent)
         self.task = task
-        self.screen_width = screen_width
-        self.screen_height = screen_height
         self.model_name = model_name
-        self.use_extension = use_extension
         self.extension_bridge = extension_bridge
-        self.use_playbooks = use_playbooks
         self.custom_guidelines = custom_guidelines.strip()
         # Normalize provider (case, whitespace) so comparisons always match
         p = str(provider or "").lower().strip()
@@ -1462,524 +1281,55 @@ class AgentWorker(QThread):
         self.openrouter_api_key = (openrouter_api_key or "").strip()
         self.google_api_key = (google_api_key or "").strip()
         self.groq_api_key = (groq_api_key or "").strip()
+        # Priority list of (slot number, provider, model); slot 1 is the primary model.
+        self.model_chain: list[tuple[int, str, str]] = [(1, self.provider, self.model_name)]
+        for slot, (fb_provider, fb_model) in enumerate(fallback_models or [], start=2):
+            fb_provider = str(fb_provider or "").lower().strip()
+            fb_model = str(fb_model or "").strip()
+            if fb_provider in valid and fb_model:
+                self.model_chain.append((slot, fb_provider, fb_model))
         self._stop_requested = False
 
     def request_stop(self):
         self._stop_requested = True
 
+    async def _check_provider(self, provider: str) -> tuple[bool, str]:
+        if provider == PROVIDER_OPENCODE:
+            return await check_opencode_accessible(self.opencode_api_key)
+        if provider == PROVIDER_OPENROUTER:
+            return await check_openrouter_accessible(self.openrouter_api_key)
+        if provider == PROVIDER_GOOGLE:
+            return await check_google_accessible(self.google_api_key)
+        if provider == PROVIDER_GROQ:
+            return await check_groq_accessible(self.groq_api_key)
+        return await check_ollama_running()
+
     # ── Thread entry point ────────────────────────────────────────────────
 
     def run(self):
         try:
-            if self.use_extension:
-                # Extension mode: own throwaway loop (no Playwright to persist)
-                loop = asyncio.new_event_loop()
-                asyncio.set_event_loop(loop)
+            loop = asyncio.new_event_loop()
+            asyncio.set_event_loop(loop)
+            try:
+                loop.run_until_complete(self._execute_extension())
+            finally:
                 try:
-                    loop.run_until_complete(self._execute_extension())
-                finally:
-                    try:
-                        pending = asyncio.all_tasks(loop)
-                        for t in pending:
-                            t.cancel()
-                        if pending:
-                            loop.run_until_complete(
-                                asyncio.gather(*pending, return_exceptions=True)
-                            )
-                    except Exception:
-                        pass
-                    loop.close()
-            else:
-                # Chromium mode: submit to the persistent BrowserSession loop
-                session = BrowserSession.get()
-                future = session.submit(self._execute_chromium())
-                future.result()  # blocks QThread until the task finishes
+                    pending = asyncio.all_tasks(loop)
+                    for t in pending:
+                        t.cancel()
+                    if pending:
+                        loop.run_until_complete(
+                            asyncio.gather(*pending, return_exceptions=True)
+                        )
+                except Exception:
+                    pass
+                loop.close()
         except Exception as exc:
             tb = traceback.format_exc()
             self.error_occurred.emit(f"Fatal error: {exc}\n{tb}")
 
     # ══════════════════════════════════════════════════════════════════════
-    #  PATH A — CHROMIUM (persistent browser + streaming LLM)
-    # ══════════════════════════════════════════════════════════════════════
-
-    async def _execute_chromium(self):
-        from browser_use import Agent, Browser
-        from playbook import PlaybookStore, PlaybookRecorder, PlaybookPlayer
-
-        session = BrowserSession.get()
-
-        # ── 0. Prepare browser (reuse or create) ─────────────────────────
-        await session.reset_for_new_task()
-        self.status_update.emit("🌐  Preparing Chromium…")
-        try:
-            browser = await session.acquire_browser(
-                Browser, self.screen_width, self.screen_height,
-            )
-        except Exception as e:
-            self.error_occurred.emit(f"Failed to launch Chromium: {e}")
-            return
-
-        self.status_update.emit(f'🧠  Task: "{self.task}"')
-
-        # ── 1. Playbook lookup & replay ──────────────────────────────────
-        if self.use_playbooks:
-            store = PlaybookStore()
-            match = store.find_match(self.task)
-            if match:
-                self.status_update.emit(
-                    f"📂  Found matching playbook: \"{match.task}\" "
-                    f"({len(match.steps)} steps, used {match.use_count}x)"
-                )
-                player = PlaybookPlayer(browser, match, self.task)
-                replay_ok, replay_msg = await player.replay(
-                    on_status=lambda m: self.status_update.emit(m),
-                )
-                if replay_ok:
-                    store.update_stats(match.id, success=True)
-                    result_text = f"Playbook replayed successfully — {replay_msg}"
-                    self.status_update.emit(f"✅  {result_text}")
-                    self.task_finished.emit(result_text)
-                    return
-                else:
-                    store.update_stats(match.id, success=False)
-                    self.status_update.emit(
-                        f"⚠️  Playbook replay failed: {replay_msg}\n"
-                        f"    Falling back to LLM agent…"
-                    )
-            else:
-                self.status_update.emit("📂  No matching playbook — using LLM agent")
-
-        # ── 2. Check backend (Ollama, OpenCode, or OpenRouter) ─────────────
-        if self.provider == PROVIDER_OPENCODE:
-            self.status_update.emit("🔍  Checking OpenCode Zen connectivity…")
-            ok, msg = await check_opencode_accessible(self.opencode_api_key)
-            if not ok:
-                self.error_occurred.emit(f"OpenCode Zen not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        elif self.provider == PROVIDER_OPENROUTER:
-            self.status_update.emit("🔍  Checking OpenRouter connectivity…")
-            ok, msg = await check_openrouter_accessible(self.openrouter_api_key)
-            if not ok:
-                self.error_occurred.emit(f"OpenRouter not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        elif self.provider == PROVIDER_GOOGLE:
-            self.status_update.emit("🔍  Checking Google Gemini connectivity…")
-            ok, msg = await check_google_accessible(self.google_api_key)
-            if not ok:
-                self.error_occurred.emit(f"Google Gemini not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        elif self.provider == PROVIDER_GROQ:
-            self.status_update.emit("🔍  Checking Groq connectivity…")
-            ok, msg = await check_groq_accessible(self.groq_api_key)
-            if not ok:
-                self.error_occurred.emit(f"Groq not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        else:
-            self.status_update.emit("🔍  Checking Ollama connectivity…")
-            ok, msg = await check_ollama_running()
-            if not ok:
-                self.error_occurred.emit(f"Ollama not available:\n{msg}")
-                return
-
-        # ── 3. LLM with streaming callback ──────────────────────────────
-        prov_label = {
-            PROVIDER_GOOGLE: "Google Gemini",
-            PROVIDER_GROQ: "Groq",
-            PROVIDER_OPENROUTER: "OpenRouter",
-            PROVIDER_OPENCODE: "OpenCode Zen",
-            PROVIDER_OLLAMA: "Ollama",
-        }.get(self.provider, self.provider)
-        self.status_update.emit(f"⚡  Provider: {prov_label}  |  Model: {self.model_name}")
-
-        # Build a LangChain callback that pipes tokens to the UI
-        from langchain_core.callbacks import BaseCallbackHandler
-
-        class _StreamHandler(BaseCallbackHandler):
-            def __init__(inner_self, signal):
-                super().__init__()
-                inner_self._signal = signal
-
-            def on_llm_new_token(inner_self, token: str, **kwargs):
-                inner_self._signal.emit(token)
-
-        handler = _StreamHandler(self.token_stream)
-
-        if self.provider == PROVIDER_OPENROUTER:
-            from langchain_core.language_models.chat_models import BaseChatModel
-            from langchain_core.messages import AIMessage
-            from langchain_core.outputs import ChatGeneration, ChatResult
-
-            class _OpenRouterChat(BaseChatModel):
-                """LangChain ChatModel using OpenRouter with single unified endpoint."""
-                model_name: str
-                api_key: str
-
-                def _convert_messages(self, messages: list) -> list[dict]:
-                    out = []
-                    for m in messages:
-                        role = "user"
-                        if isinstance(m, AIMessage):
-                            role = "assistant"
-                        content = getattr(m, "content", "")
-                        images = []
-                        if isinstance(content, list):
-                            texts = []
-                            for p in content:
-                                d = p if isinstance(p, dict) else (getattr(p, "__dict__", {}) or {})
-                                t = d.get("type") or getattr(p, "type", None)
-                                if t == "text":
-                                    texts.append(d.get("text", "") or getattr(p, "text", ""))
-                                elif t == "image_url":
-                                    iu = d.get("image_url") or getattr(p, "image_url", None)
-                                    url = (iu.get("url") if isinstance(iu, dict) else getattr(iu, "url", "")) or ""
-                                    if "base64," in str(url):
-                                        images.append(str(url).split("base64,", 1)[1])
-                            out.append({"role": role, "content": " ".join(texts), "images": images})
-                        else:
-                            out.append({"role": role, "content": str(content), "images": images})
-                    return out
-
-                def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-                    raise NotImplementedError("Use async")
-
-                async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-                    msgs = self._convert_messages(messages)
-                    token_handler = handler
-
-                    def _on_token(t):
-                        token_handler.on_llm_new_token(t)
-                        if run_manager and run_manager.handlers:
-                            for h in run_manager.handlers:
-                                if h is not token_handler and hasattr(h, "on_llm_new_token"):
-                                    h.on_llm_new_token(t)
-
-                    text = await openrouter_chat_stream(
-                        self.model_name, msgs, self.api_key, on_token=_on_token
-                    )
-                    return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
-
-                @property
-                def _llm_type(self) -> str:
-                    return "openrouter"
-
-            llm = _OpenRouterChat(
-                model_name=self.model_name,
-                api_key=self.openrouter_api_key,
-                callbacks=[handler],
-            )
-        elif self.provider == PROVIDER_OPENCODE:
-            from langchain_core.language_models.chat_models import BaseChatModel
-            from langchain_core.messages import BaseMessage, HumanMessage, AIMessage
-            from langchain_core.outputs import ChatGeneration, ChatResult
-            from langchain_core.callbacks import CallbackManagerForLLMRun, AsyncCallbackManagerForLLMRun
-
-            class _OpenCodeChat(BaseChatModel):
-                """LangChain ChatModel that uses OpenCode Zen with correct endpoint per model."""
-                model_name: str
-                api_key: str
-
-                def _convert_messages(self, messages: list) -> list[dict]:
-                    out = []
-                    for m in messages:
-                        role = "user"
-                        if isinstance(m, AIMessage):
-                            role = "assistant"
-                        content = getattr(m, "content", "")
-                        images = []
-                        if isinstance(content, list):
-                            texts = []
-                            for p in content:
-                                d = p if isinstance(p, dict) else (getattr(p, "__dict__", {}) or {})
-                                t = d.get("type") or getattr(p, "type", None)
-                                if t == "text":
-                                    texts.append(d.get("text", "") or getattr(p, "text", ""))
-                                elif t == "image_url":
-                                    iu = d.get("image_url") or getattr(p, "image_url", None)
-                                    url = (iu.get("url") if isinstance(iu, dict) else getattr(iu, "url", "")) or ""
-                                    if "base64," in str(url):
-                                        images.append(str(url).split("base64,", 1)[1])
-                            out.append({"role": role, "content": " ".join(texts), "images": images})
-                        else:
-                            out.append({"role": role, "content": str(content), "images": images})
-                    return out
-
-                def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-                    raise NotImplementedError("Use async")
-
-                async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-                    msgs = self._convert_messages(messages)
-                    token_handler = handler  # capture from outer scope
-                    def _on_token(t):
-                        token_handler.on_llm_new_token(t)
-                        if run_manager and run_manager.handlers:
-                            for h in run_manager.handlers:
-                                if h is not token_handler and hasattr(h, "on_llm_new_token"):
-                                    h.on_llm_new_token(t)
-                    text = await opencode_chat_stream(
-                        self.model_name, msgs, self.api_key, on_token=_on_token
-                    )
-                    return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
-
-                @property
-                def _llm_type(self) -> str:
-                    return "opencode"
-
-            llm = _OpenCodeChat(
-                model_name=self.model_name,
-                api_key=self.opencode_api_key,
-                callbacks=[handler],
-            )
-        elif self.provider == PROVIDER_GOOGLE:
-            from langchain_core.language_models.chat_models import BaseChatModel
-            from langchain_core.messages import AIMessage
-            from langchain_core.outputs import ChatGeneration, ChatResult
-
-            class _GoogleChat(BaseChatModel):
-                """LangChain ChatModel using Google Gemini."""
-                model_name: str
-                api_key: str
-
-                def _convert_messages(self, messages: list) -> list[dict]:
-                    out = []
-                    for m in messages:
-                        role = "user"
-                        if isinstance(m, AIMessage):
-                            role = "model"
-                        content = getattr(m, "content", "")
-                        images = []
-                        if isinstance(content, list):
-                            texts = []
-                            for p in content:
-                                d = p if isinstance(p, dict) else (getattr(p, "__dict__", {}) or {})
-                                t = d.get("type") or getattr(p, "type", None)
-                                if t == "text":
-                                    texts.append(d.get("text", "") or getattr(p, "text", ""))
-                                elif t == "image_url":
-                                    iu = d.get("image_url") or getattr(p, "image_url", None)
-                                    url = (iu.get("url") if isinstance(iu, dict) else getattr(iu, "url", "")) or ""
-                                    if "base64," in str(url):
-                                        images.append(str(url).split("base64,", 1)[1])
-                            out.append({"role": role, "content": " ".join(texts), "images": images})
-                        else:
-                            out.append({"role": role, "content": str(content), "images": images})
-                    return out
-
-                def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-                    raise NotImplementedError("Use async")
-
-                async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-                    msgs = self._convert_messages(messages)
-                    def _on_token(t):
-                        handler.on_llm_new_token(t)
-                        if run_manager and run_manager.handlers:
-                            for h in run_manager.handlers:
-                                if h is not handler and hasattr(h, "on_llm_new_token"):
-                                    h.on_llm_new_token(t)
-                    text = await google_chat_stream(
-                        self.model_name, msgs, self.api_key, on_token=_on_token
-                    )
-                    return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
-
-                @property
-                def _llm_type(self) -> str:
-                    return "google"
-
-            llm = _GoogleChat(
-                model_name=self.model_name,
-                api_key=self.google_api_key,
-                callbacks=[handler],
-            )
-        elif self.provider == PROVIDER_GROQ:
-            from langchain_core.language_models.chat_models import BaseChatModel
-            from langchain_core.messages import AIMessage
-            from langchain_core.outputs import ChatGeneration, ChatResult
-
-            class _GroqChat(BaseChatModel):
-                """LangChain ChatModel using Groq (OpenAI-compatible)."""
-                model_name: str
-                api_key: str
-
-                def _convert_messages(self, messages: list) -> list[dict]:
-                    out = []
-                    for m in messages:
-                        role = "assistant" if isinstance(m, AIMessage) else "user"
-                        content = getattr(m, "content", "")
-                        images = []
-                        if isinstance(content, list):
-                            texts = []
-                            for p in content:
-                                d = p if isinstance(p, dict) else (getattr(p, "__dict__", {}) or {})
-                                t = d.get("type") or getattr(p, "type", None)
-                                if t == "text":
-                                    texts.append(d.get("text", "") or getattr(p, "text", ""))
-                                elif t == "image_url":
-                                    iu = d.get("image_url") or getattr(p, "image_url", None)
-                                    url = (iu.get("url") if isinstance(iu, dict) else getattr(iu, "url", "")) or ""
-                                    if "base64," in str(url):
-                                        images.append(str(url).split("base64,", 1)[1])
-                            out.append({"role": role, "content": " ".join(texts), "images": images})
-                        else:
-                            out.append({"role": role, "content": str(content), "images": images})
-                    return out
-
-                def _generate(self, messages, stop=None, run_manager=None, **kwargs):
-                    raise NotImplementedError("Use async")
-
-                async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
-                    msgs = self._convert_messages(messages)
-                    def _on_token(t):
-                        handler.on_llm_new_token(t)
-                        if run_manager and run_manager.handlers:
-                            for h in run_manager.handlers:
-                                if h is not handler and hasattr(h, "on_llm_new_token"):
-                                    h.on_llm_new_token(t)
-                    text = await groq_chat_stream(
-                        self.model_name, msgs, self.api_key, on_token=_on_token
-                    )
-                    return ChatResult(generations=[ChatGeneration(message=AIMessage(content=text))])
-
-                @property
-                def _llm_type(self) -> str:
-                    return "groq"
-
-            llm = _GroqChat(
-                model_name=self.model_name,
-                api_key=self.groq_api_key,
-                callbacks=[handler],
-            )
-        else:
-            try:
-                from langchain_ollama import ChatOllama
-                llm = ChatOllama(
-                    model=self.model_name,
-                    base_url=OLLAMA_BASE_URL,
-                    num_ctx=8192,
-                    streaming=True,
-                    callbacks=[handler],
-                )
-            except Exception:
-                # Fallback: browser-use's own ChatOllama (may lack streaming)
-                from browser_use.llm.ollama.chat import ChatOllama as BUChatOllama
-                llm = BUChatOllama(
-                    model=self.model_name,
-                    host=OLLAMA_BASE_URL,
-                    ollama_options={"num_ctx": 8192},
-                    callbacks=[handler],
-                )
-
-        async def _should_stop() -> bool:
-            return self._stop_requested
-
-        # ── 4. Retry loop ────────────────────────────────────────────────
-        for attempt in range(1, MAX_RETRIES + 1):
-            if self._stop_requested:
-                self.status_update.emit("🛑  Stopped by user.")
-                return
-
-            try:
-                label = (
-                    "🚀  Executing agent…"
-                    if attempt == 1
-                    else f"🔄  Retry {attempt}/{MAX_RETRIES}…"
-                )
-                self.status_update.emit(label)
-
-                def _step_callback(state, output, step_idx):
-                    try:
-                        if output and hasattr(output, "current_state"):
-                            cs = output.current_state
-                            if hasattr(cs, "thinking") and cs.thinking:
-                                self.status_update.emit(f"🤔 {cs.thinking}")
-                            if hasattr(cs, "next_goal") and cs.next_goal:
-                                self.status_update.emit(f"🎯 {cs.next_goal}")
-                    except Exception:
-                        pass
-
-                agent = Agent(
-                    task=self.task,
-                    llm=llm,
-                    browser=browser,
-                    use_vision=True,
-                    extend_system_message=SYSTEM_INSTRUCTION,
-                    register_new_step_callback=_step_callback,
-                    register_should_stop_callback=_should_stop,
-                    max_failures=99,  # Never give up — keep trying different approaches
-                )
-
-                history = await agent.run()
-
-                result_text = "Task completed successfully."
-                if history:
-                    try:
-                        final = history.final_result()
-                        if final:
-                            result_text = str(final)
-                    except Exception:
-                        try:
-                            result_text = str(history)
-                        except Exception:
-                            pass
-
-                # Record playbook on completion (record even if success=False for partial progress)
-                if self.use_playbooks and history:
-                    try:
-                        recorder = PlaybookRecorder(self.task)
-                        pb = recorder.record(history)
-                        if pb.steps:
-                            store = PlaybookStore()
-                            store.save(pb)
-                            self.status_update.emit(
-                                f"💾  Playbook saved ({len(pb.steps)} steps) "
-                                f"— future similar tasks will be instant!"
-                            )
-                    except Exception as rec_exc:
-                        self.status_update.emit(
-                            f"⚠️  Playbook recording failed (non-critical): {rec_exc}"
-                        )
-
-                self.status_update.emit(f"✅  {result_text}")
-                self.task_finished.emit(result_text)
-                return
-
-            except (TimeoutError, ConnectionError, OSError) as exc:
-                await self._handle_browser_crash_if_needed(session, exc, Browser)
-                self._handle_retry(attempt, exc)
-                # Re-acquire browser after crash
-                if not session.browser_alive:
-                    try:
-                        browser = await session.acquire_browser(
-                            Browser, self.screen_width, self.screen_height,
-                        )
-                    except Exception:
-                        pass
-            except Exception as exc:
-                await self._handle_browser_crash_if_needed(session, exc, Browser)
-                self._handle_retry(attempt, exc)
-                if not session.browser_alive:
-                    try:
-                        browser = await session.acquire_browser(
-                            Browser, self.screen_width, self.screen_height,
-                        )
-                    except Exception:
-                        pass
-
-    @staticmethod
-    async def _handle_browser_crash_if_needed(session, exc, Browser):
-        """If the error looks like a dead browser, tell the session."""
-        err = str(exc).lower()
-        crash_keywords = (
-            "browser has been closed", "target closed",
-            "connection refused", "session closed",
-        )
-        if any(kw in err for kw in crash_keywords):
-            await session.handle_crash()
-
-    # ══════════════════════════════════════════════════════════════════════
-    #  PATH B — CHROME EXTENSION (streaming vision agent loop)
+    #  CHROME EXTENSION AGENT LOOP (streaming vision)
     # ══════════════════════════════════════════════════════════════════════
 
     async def _execute_extension(self):
@@ -2013,62 +1363,34 @@ class AgentWorker(QThread):
                 )
                 return
 
-        # ── Check backend (Ollama, OpenCode, or OpenRouter) ───────────────
-        if self.provider == PROVIDER_OPENCODE:
-            self.status_update.emit("🔍  Checking OpenCode Zen connectivity…")
-            ok, msg = await check_opencode_accessible(self.opencode_api_key)
-            if not ok:
-                self.error_occurred.emit(f"OpenCode Zen not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        elif self.provider == PROVIDER_OPENROUTER:
-            self.status_update.emit("🔍  Checking OpenRouter connectivity…")
-            ok, msg = await check_openrouter_accessible(self.openrouter_api_key)
-            if not ok:
-                self.error_occurred.emit(f"OpenRouter not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        elif self.provider == PROVIDER_GOOGLE:
-            self.status_update.emit("🔍  Checking Google Gemini connectivity…")
-            ok, msg = await check_google_accessible(self.google_api_key)
-            if not ok:
-                self.error_occurred.emit(f"Google Gemini not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        elif self.provider == PROVIDER_GROQ:
-            self.status_update.emit("🔍  Checking Groq connectivity…")
-            ok, msg = await check_groq_accessible(self.groq_api_key)
-            if not ok:
-                self.error_occurred.emit(f"Groq not available:\n{msg}")
-                return
-            self.status_update.emit(f"  ↳ {msg}")
-        else:
-            self.status_update.emit("🔍  Checking Ollama connectivity…")
-            ok, msg = await check_ollama_running()
-            if not ok:
-                self.error_occurred.emit(f"Ollama not available:\n{msg}")
-                return
+        # ── Check each model's backend; keep the reachable ones in priority order ──
+        reachable: list[tuple[int, str, str]] = []
+        failures: list[str] = []
+        for slot, provider, model in self.model_chain:
+            label = f"Model {slot} ({_PROVIDER_LABELS.get(provider, provider)} / {model})"
+            self.status_update.emit(f"🔍  Checking {label}…")
+            ok, msg = await self._check_provider(provider)
+            if ok:
+                reachable.append((slot, provider, model))
+                if msg:
+                    self.status_update.emit(f"  ↳ {msg}")
+            else:
+                failures.append(f"{label}: {msg}")
+                self.status_update.emit(f"  ↳ ⚠️  Skipping — {msg}")
+        if not reachable:
+            self.error_occurred.emit("No configured model is available:\n" + "\n".join(failures))
+            return
+        self.model_chain = reachable
+        active = 0
+        _, self.provider, self.model_name = self.model_chain[active]
 
         self.status_update.emit(f'🧠  Task: "{self.task}"')
-        prov_label = {
-            PROVIDER_GOOGLE: "Google Gemini",
-            PROVIDER_GROQ: "Groq",
-            PROVIDER_OPENROUTER: "OpenRouter",
-            PROVIDER_OPENCODE: "OpenCode Zen",
-            PROVIDER_OLLAMA: "Ollama",
-        }.get(self.provider, self.provider)
-        self.status_update.emit(f"⚡  Provider: {prov_label}  |  Model: {self.model_name}  |  Mode: Chrome Extension")
+        chain_desc = "  →  ".join(
+            f"{slot}. {_PROVIDER_LABELS.get(p, p)} / {m}" for slot, p, m in self.model_chain
+        )
+        self.status_update.emit(f"⚡  Models: {chain_desc}  |  Mode: Chrome Extension")
 
-        # LLM client: OpenCode, OpenRouter, Google, Groq, or Ollama
-        use_opencode = self.provider == PROVIDER_OPENCODE
-        use_openrouter = self.provider == PROVIDER_OPENROUTER
-        use_google = self.provider == PROVIDER_GOOGLE
-        use_groq = self.provider == PROVIDER_GROQ
         ollama_client = None
-        if use_opencode or use_openrouter or use_google or use_groq:
-            pass  # use provider-specific chat stream
-        else:
-            ollama_client = ollama_lib.AsyncClient(host=OLLAMA_BASE_URL)
 
         def _ollama_to_openai_messages(msgs: list) -> list:
             """Convert Ollama-style messages (with images) to OpenAI format."""
@@ -2089,59 +1411,56 @@ class AgentWorker(QThread):
                     out.append({"role": role, "content": content})
             return out
 
-        async def _chat_stream(messages: list) -> str:
-            """Stream chat and return full text. Uses OpenCode, OpenRouter, or Ollama."""
+        async def _chat_once(provider: str, model: str, messages: list) -> str:
+            nonlocal ollama_client
+            on_token = lambda t: self.token_stream.emit(t)  # noqa: E731
+            if provider == PROVIDER_OPENCODE:
+                return await opencode_chat_stream(model, messages, self.opencode_api_key, on_token=on_token)
+            if provider == PROVIDER_OPENROUTER:
+                return await openrouter_chat_stream(model, messages, self.openrouter_api_key, on_token=on_token)
+            if provider == PROVIDER_GOOGLE:
+                return await google_chat_stream(model, messages, self.google_api_key, on_token=on_token)
+            if provider == PROVIDER_GROQ:
+                return await groq_chat_stream(model, messages, self.groq_api_key, on_token=on_token)
+            if ollama_client is None:
+                ollama_client = ollama_lib.AsyncClient(host=OLLAMA_BASE_URL)
             full_text = ""
-            if use_opencode:
-                full_text = await opencode_chat_stream(
-                    self.model_name,
-                    messages,
-                    self.opencode_api_key,
-                    on_token=lambda t: self.token_stream.emit(t),
-                )
-            elif use_openrouter:
-                full_text = await openrouter_chat_stream(
-                    self.model_name,
-                    messages,
-                    self.openrouter_api_key,
-                    on_token=lambda t: self.token_stream.emit(t),
-                )
-            elif use_google:
-                full_text = await google_chat_stream(
-                    self.model_name,
-                    messages,
-                    self.google_api_key,
-                    on_token=lambda t: self.token_stream.emit(t),
-                )
-            elif use_groq:
-                full_text = await groq_chat_stream(
-                    self.model_name,
-                    messages,
-                    self.groq_api_key,
-                    on_token=lambda t: self.token_stream.emit(t),
-                )
-            else:
-                stream = await ollama_client.chat(
-                    model=self.model_name,
-                    messages=messages,
-                    stream=True,
-                )
-                async for chunk in stream:
-                    content = ""
-                    if hasattr(chunk, "message"):
-                        content = getattr(chunk.message, "content", "")
-                    elif isinstance(chunk, dict):
-                        content = chunk.get("message", {}).get("content", "")
-                    if content:
-                        full_text += content
-                        self.token_stream.emit(content)
+            stream = await ollama_client.chat(model=model, messages=messages, stream=True)
+            async for chunk in stream:
+                content = ""
+                if hasattr(chunk, "message"):
+                    content = getattr(chunk.message, "content", "")
+                elif isinstance(chunk, dict):
+                    content = chunk.get("message", {}).get("content", "")
+                if content:
+                    full_text += content
+                    on_token(content)
             return full_text
+
+        async def _chat_stream(messages: list) -> str:
+            """Stream chat on the active model; on failure fall back to the next model in priority order."""
+            nonlocal active
+            while True:
+                slot, provider, model = self.model_chain[active]
+                try:
+                    return await _chat_once(provider, model, messages)
+                except Exception as e:
+                    if self._stop_requested or active + 1 >= len(self.model_chain):
+                        raise
+                    active += 1
+                    next_slot, next_provider, next_model = self.model_chain[active]
+                    self.provider, self.model_name = next_provider, next_model
+                    self.status_update.emit(
+                        f"⚠️  Model {slot} ({_PROVIDER_LABELS.get(provider, provider)} / {model}) failed: "
+                        f"{str(e)[:200]}\n"
+                        f"↪️  Falling back to Model {next_slot} "
+                        f"({_PROVIDER_LABELS.get(next_provider, next_provider)} / {next_model})"
+                    )
 
         action_history: list[str] = []        # human-readable log per step
         action_signatures: list[str] = []     # exact action fingerprints for loop detection
         conversation: list[dict] = []         # multi-turn LLM messages (user+assistant)
         consecutive_failures = 0
-        extension_recorded_steps: list[dict] = []  # for playbook recording (Extension mode)
 
         # Screenshot caching — only refresh when page actually changes
         last_screenshot_b64: str | None = None
@@ -2504,23 +1823,6 @@ class AgentWorker(QThread):
                 if act_type == "done":
                     result_text = action.get("result", "Task completed.")
                     self.status_update.emit(f"✅  {result_text}")
-                    # Record playbook on completion (Extension mode)
-                    if self.use_playbooks and extension_recorded_steps:
-                        try:
-                            from playbook import PlaybookStore, PlaybookRecorder
-                            recorder = PlaybookRecorder(self.task)
-                            pb = recorder.record_extension(
-                                extension_recorded_steps,
-                                primary_url=url,
-                            )
-                            if pb.steps:
-                                store = PlaybookStore()
-                                store.save(pb)
-                                self.status_update.emit(
-                                    f"📂  Saved playbook ({len(pb.steps)} steps)"
-                                )
-                        except Exception as rec_err:
-                            log.warning("Extension playbook record failed: %s", rec_err)
                     self.task_finished.emit(result_text)
                     return
 
@@ -2595,11 +1897,6 @@ class AgentWorker(QThread):
                         pass
                     state_diff = _state_diff_summary(state_before, state_after)
 
-                    extension_recorded_steps.append({
-                        "action_name": "click",
-                        "action_params": {"coordinate_x": x, "coordinate_y": y},
-                        "url": url,
-                    })
                     action_outcome = f"Clicked at ({x},{y}). Element hit: <{tag}>. {state_diff}If you intended to focus an input field, you can now use 'type' to enter text."
                     await asyncio.sleep(1.5)
 
@@ -2645,11 +1942,6 @@ if(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable)){{
                     if not res_type.get("success") and pre_check is None:
                         pre_check = res_type.get("error", "Type failed.")
                     action_history.append(f"type \"{text[:40]}\"")
-                    extension_recorded_steps.append({
-                        "action_name": "input",
-                        "action_params": {"text": text},
-                        "url": url,
-                    })
                     action_outcome = f"Typed \"{text[:40]}\" into the focused element."
                     if pre_check:
                         action_outcome = f"{pre_check} " + action_outcome
@@ -2675,11 +1967,6 @@ if(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable)){{
                     self.status_update.emit(f"🌐  Step {step}: navigate → {nav_url}")
                     await bridge.navigate(nav_url)
                     action_history.append(f"navigate → {nav_url}")
-                    extension_recorded_steps.append({
-                        "action_name": "navigate",
-                        "action_params": {"url": nav_url},
-                        "url": url,
-                    })
                     await asyncio.sleep(2.0)
                     state_after_n = {}
                     try:
@@ -2703,14 +1990,6 @@ if(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable)){{
                     self.status_update.emit(f"📜  Step {step}: scroll {direction}")
                     await bridge.scroll(direction, amount)
                     action_history.append(f"scroll {direction} {amount}px")
-                    extension_recorded_steps.append({
-                        "action_name": "scroll",
-                        "action_params": {
-                            "down": direction != "up",
-                            "pages": max(0.1, amount / 800.0),
-                        },
-                        "url": url,
-                    })
                     await asyncio.sleep(1.8)
                     state_after_s = {}
                     try:
@@ -2733,11 +2012,6 @@ if(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable)){{
                     self.status_update.emit(f"⌨️  Step {step}: select all & type \"{text[:40]}\"")
                     await bridge.select_all_and_type(text)
                     action_history.append(f"select_all_and_type \"{text[:40]}\"")
-                    extension_recorded_steps.append({
-                        "action_name": "input",
-                        "action_params": {"text": text, "clear": True},
-                        "url": url,
-                    })
                     await asyncio.sleep(1.2)
                     state_after_sat = {}
                     try:
@@ -2760,11 +2034,6 @@ if(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable)){{
                     self.status_update.emit(f"⌨️  Step {step}: press {key}")
                     await bridge.press_key(key)
                     action_history.append(f"press_key {key}")
-                    extension_recorded_steps.append({
-                        "action_name": "send_keys",
-                        "action_params": {"keys": key},
-                        "url": url,
-                    })
                     last_press_key = key  # Track which key for screenshot refresh logic
                     if key == "Enter":
                         await asyncio.sleep(2.0)
@@ -2913,25 +2182,3 @@ if(el&&(el.tagName==='INPUT'||el.tagName==='TEXTAREA'||el.isContentEditable)){{
             f"The agent tried many different approaches. You can run the task again "
             f"to continue from where it left off, or try rephrasing the task."
         )
-
-    # ══════════════════════════════════════════════════════════════════════
-    #  SHARED HELPERS
-    # ══════════════════════════════════════════════════════════════════════
-
-    def _handle_retry(self, attempt: int, exc: Exception):
-        msg = str(exc)
-        if attempt < MAX_RETRIES:
-            self.status_update.emit(
-                f"⚠️  Attempt {attempt} failed: {msg}  — retrying in "
-                f"{RETRY_DELAY_SECONDS}s…"
-            )
-            gc.collect()
-            for _ in range(RETRY_DELAY_SECONDS * 10):
-                if self._stop_requested:
-                    self.status_update.emit("🛑  Stopped by user during retry wait.")
-                    return
-                self.msleep(100)
-        else:
-            self.error_occurred.emit(
-                f"❌  All {MAX_RETRIES} attempts failed.\nLast error: {msg}"
-            )

@@ -1,6 +1,6 @@
 # MyBot
 
-A desktop dock that lets you control your browser with natural language. Uses AI (Ollama, Google Gemini, Groq, OpenRouter, or OpenCode Zen) to navigate, fill forms, click buttons, and extract info. Supports built-in Chromium or your own Chrome via extension.
+A desktop dock that lets you control your browser with natural language. Uses AI (Ollama, Google Gemini, Groq, OpenRouter, or OpenCode Zen) to navigate, fill forms, click buttons, and extract info. Drives your own Chrome through the MyBot Bridge extension.
 
 **Created by AJ (Ahmed Jouini)**
 
@@ -10,11 +10,25 @@ A desktop dock that lets you control your browser with natural language. Uses AI
 
 ```bash
 pip install -r requirements.txt
-playwright install chromium
 python main.py
 ```
 
-Type a task in the dock bar (e.g. *"Search for coffee makers on Amazon"*) and press Enter. Switch providers and models from the dock dropdowns — only models usable for browser automation (vision + chat) are shown. No restart needed.
+Then load the Chrome extension (see [Chrome Extension Setup](#6-chrome-extension-setup)). Type a task in the dock bar (e.g. *"Search for coffee makers on Amazon"*) and press Enter. Switch providers and models from the dock dropdowns — only models usable for browser automation (vision + chat) are shown. No restart needed.
+
+### Model priority (fallback) and API keys
+
+Open ⚙ Settings → **Model priority** to pick a provider and model for **Model 1**, **Model 2** and **Model 3** (↻ loads the provider's model list). Model 1 is used first; if it fails (error, rate limit, bad key, provider down), MyBot automatically continues the same task on Model 2, then Model 3. Models whose provider isn't reachable at start are skipped. The dock dropdowns always show Model 1.
+
+API keys are read automatically from a `.env` file next to `main.py` (it is git-ignored):
+
+```
+OPENROUTER_API_KEY=...
+GOOGLE_API_KEY=...        # or GEMINI_API_KEY
+GROQ_API_KEY=...
+OPENCODE_API_KEY=...
+```
+
+Any key you type in ⚙ Settings overrides the `.env` value; clear the field to go back to `.env`.
 
 ---
 
@@ -101,173 +115,14 @@ Type a task in the dock bar (e.g. *"Search for coffee makers on Amazon"*) and pr
 
 ---
 
-### 6. Browser Modes
+### 6. Chrome Extension Setup
 
-| Mode | Description | When to use |
-|------|-------------|-------------|
-| **Chromium** (default) | Launches a separate Chromium window | Headless, server, VPS |
-| **Chrome Extension** | Controls your existing Chrome via extension | Use your real Chrome profile |
+MyBot controls your existing Chrome (your real profile) through the bundled extension.
 
-**Using Chrome Extension mode:**
-1. Click the **Chrome** toggle in the dock
-2. Click the **📦** button to open the extension folder
-3. In Chrome: `chrome://extensions` → Developer mode ON → Load unpacked → select the `extension` folder
-4. The extension should show a green dot when connected
-5. If not connected, refresh the extension or reopen Chrome
-
----
-
-## Server Mode (Headless / API)
-
-Use the server for Android clients, web apps, or VPS deployment.
-
-### Start the Server
-
-```bash
-pip install -r requirements.txt
-playwright install chromium
-python server.py
-```
-
-Server runs at **http://0.0.0.0:8765** by default.
-
-### Options
-
-```bash
-python server.py --port 9000      # Custom port
-python server.py --host 127.0.0.1 # Bind to localhost only
-```
-
-### Linux Headless (e.g. VPS)
-
-```bash
-export QT_QPA_PLATFORM=offscreen
-python server.py --host 0.0.0.0
-```
-
-### Endpoints
-
-| Endpoint | Method | Description |
-|----------|--------|-------------|
-| `GET /health` | GET | Health check |
-| `POST /task` | POST | Run a task (blocking) |
-| `GET /task/stream` | GET | Run task with SSE status stream |
-
-### Example: Run a Task
-
-```bash
-curl -X POST http://localhost:8765/task \
-  -H "Content-Type: application/json" \
-  -d '{"task": "Search for best laptops on Amazon", "provider": "opencode", "opencode_api_key": "your-key"}'
-```
-
-### Example: With OpenCode (No Ollama)
-
-```json
-{
-  "task": "Find the price of iPhone 16 on Apple.com",
-  "provider": "opencode",
-  "opencode_api_key": "sk-your-key",
-  "model_name": "glm-5-free"
-}
-```
-
-### Example: With OpenRouter
-
-```json
-{
-  "task": "Search for laptops on Amazon",
-  "provider": "openrouter",
-  "openrouter_api_key": "sk-or-your-key",
-  "model_name": "google/gemini-2.0-flash"
-}
-```
-
-### Example: With Google Gemini
-
-```json
-{
-  "task": "Search for laptops on Amazon",
-  "provider": "google",
-  "google_api_key": "your-gemini-api-key",
-  "model_name": "gemini-2.0-flash"
-}
-```
-
-### Example: With Groq
-
-```json
-{
-  "task": "Search for laptops on Amazon",
-  "provider": "groq",
-  "groq_api_key": "gsk-your-key",
-  "model_name": "llama-3.2-90b-vision-preview"
-}
-```
-
-### Example: Stream Status (SSE)
-
-```bash
-curl "http://localhost:8765/task/stream?task=Search+coffee+on+Google&provider=opencode&opencode_api_key=your-key"
-```
-
----
-
-## Free VPS Deployment
-
-For hosting on free tiers (no Ollama on the server).
-
-### Requirements
-
-- Python 3.10+
-- Playwright Chromium (~400 MB)
-- ~1 GB RAM
-- Use OpenCode Zen (or another cloud API) — not Ollama
-
-### AI Providers Supported in Server Mode
-
-| Provider | API Key | Notes |
-|----------|---------|-------|
-| **ollama** | None | Local models, requires Ollama running |
-| **google** | google_api_key | Google Gemini, free tier |
-| **groq** | groq_api_key | Fast Llama, free tier |
-| **openrouter** | openrouter_api_key | 400+ models (GPT, Claude, Gemini, etc.) |
-| **opencode** | opencode_api_key | Curated coding models |
-
-### VPS Hosting Providers
-
-| Provider | Free Tier | Notes |
-|----------|-----------|-------|
-| **Oracle Cloud** | 2 AMD VMs or 4 ARM VMs, 24 GB RAM | Good for long-running server |
-| **Fly.io** | Limited free tier | Docker-friendly |
-| **Railway** | Free tier with limits | Easy deploy |
-| **Render** | Free tier | Sleeps when idle |
-
-### Deploy on Linux (VPS)
-
-```bash
-# Install Python 3.10+, then:
-pip install -r requirements.txt
-playwright install chromium
-playwright install-deps  # Linux dependencies for Chromium
-
-# Run headless
-export QT_QPA_PLATFORM=offscreen
-python server.py --host 0.0.0.0 --port 8765
-```
-
-Use `provider: "opencode"` and `opencode_api_key` in requests; no Ollama needed on the server.
-
----
-
-## Android / Mobile
-
-Ollama does not run on Android. Use server mode + OpenCode:
-
-1. Run the server on a PC or VPS (see above)
-2. Ensure the server is reachable (same network or public IP/domain)
-3. Point your Android app or web client at `http://your-server:8765`
-4. Send requests with `provider: "opencode"` and your API key
+1. Click the **📦** button in the dock to open the extension folder
+2. In Chrome: `chrome://extensions` → Developer mode ON → Load unpacked → select the `extension` folder
+3. The extension popup and the dock's status dot turn green when connected
+4. If not connected, refresh the extension or reopen Chrome
 
 ---
 
@@ -283,18 +138,7 @@ Ollama does not run on Android. Use server mode + OpenCode:
 | "OpenRouter key invalid" | Settings → verify key at openrouter.ai/keys |
 | "Google/Groq key invalid" | Settings → verify keys at aistudio.google.com, console.groq.com |
 | Extension not connecting | Load unpacked extension; check green dot; restart Chrome |
-| Chromium fails to launch | `playwright install chromium` |
 | Slow first task | Model loads on first use; later tasks are faster |
-
-### Server
-
-| Issue | Fix |
-|-------|-----|
-| Server won’t start | `pip install fastapi uvicorn`; check port is free |
-| "Module not found" | `pip install -r requirements.txt` |
-| Chromium fails (Linux) | `playwright install-deps` and `playwright install chromium` |
-| Black/blank display (Linux) | `export QT_QPA_PLATFORM=offscreen` |
-| CORS errors from web client | Server has CORS enabled for `*`; check client URL |
 
 ### OpenCode Zen
 
@@ -335,13 +179,10 @@ Ollama does not run on Android. Use server mode + OpenCode:
 
 ```
 mybot/
-├── main.py           # Desktop dock (PyQt6)
-├── server.py         # Headless API server (FastAPI)
-├── agent_logic.py    # Browser automation + LLM
+├── main.py             # Desktop dock (PyQt6)
+├── agent_logic.py      # Vision agent loop + LLM providers
 ├── extension_bridge.py # WebSocket bridge for Chrome extension
-├── playbook.py       # Record/replay task sequences
-├── extension/        # Chrome extension (load unpacked)
-├── playbooks/        # Saved playbooks (auto-created)
+├── extension/          # Chrome extension (load unpacked)
 └── requirements.txt
 ```
 

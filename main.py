@@ -45,16 +45,15 @@ from PyQt6.QtWidgets import (
     QDialog,
     QFormLayout,
     QSpinBox,
-    QCheckBox,
     QDialogButtonBox,
     QGraphicsDropShadowEffect,
+    QScrollArea,
+    QFrame,
 )
 from agent_logic import (
     AgentWorker,
     ModelFetchWorker,
     ModelWarmupWorker,
-    ExtensionProbeWorker,
-    BrowserSession,
     ModelPool,
     PROVIDER_OLLAMA,
     PROVIDER_OPENCODE,
@@ -63,7 +62,6 @@ from agent_logic import (
     PROVIDER_GROQ,
 )
 from extension_bridge import ExtensionBridge, DEFAULT_WS_PORT
-from playbook import PlaybookStore
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -263,28 +261,6 @@ QComboBox#ModelSelector QAbstractItemView {
     selection-background-color: rgba(0, 212, 255, 0.2);
     selection-color: #00d4ff;
     font-size: 11px;
-}
-
-/* ─── Browser Mode Toggle ─────────────────────────────────────────────────── */
-
-QPushButton#BrowserToggle {
-    font-size: 11px;
-    min-width: 50px;
-    max-width: 100px;
-    padding: 4px 8px;
-    border-radius: 6px;
-}
-
-QPushButton#BrowserToggle[active="true"] {
-    background-color: rgba(76, 175, 80, 0.15);
-    border-color: rgba(76, 175, 80, 0.5);
-    color: #4CAF50;
-}
-
-QPushButton#BrowserToggle[active="false"] {
-    background-color: rgba(0, 212, 255, 0.06);
-    border-color: rgba(0, 212, 255, 0.2);
-    color: #666688;
 }
 
 /* ─── Minimize / Exit buttons ──────────────────────────────────────────────── */
@@ -622,28 +598,6 @@ QComboBox#ModelSelector QAbstractItemView {
     font-size: 11px;
 }
 
-/* ─── Browser Mode Toggle ─────────────────────────────────────────────────── */
-
-QPushButton#BrowserToggle {
-    font-size: 11px;
-    min-width: 50px;
-    max-width: 100px;
-    padding: 4px 8px;
-    border-radius: 6px;
-}
-
-QPushButton#BrowserToggle[active="true"] {
-    background-color: rgba(76, 175, 80, 0.15);
-    border-color: rgba(76, 175, 80, 0.6);
-    color: #2e7d32;
-}
-
-QPushButton#BrowserToggle[active="false"] {
-    background-color: rgba(0, 119, 182, 0.06);
-    border-color: rgba(0, 119, 182, 0.25);
-    color: #6c757d;
-}
-
 /* ─── Minimize / Exit buttons ──────────────────────────────────────────────── */
 
 QPushButton#MinimizeBtn {
@@ -812,6 +766,45 @@ def get_theme_colors(theme: str) -> dict:
 SETTINGS_ORG = "MyBot"
 SETTINGS_APP = "MyBot"
 DEFAULT_MODEL = "minicpm-v"
+
+PROVIDER_CHOICES = (
+    ("Ollama (local)", PROVIDER_OLLAMA),
+    ("Google Gemini", PROVIDER_GOOGLE),
+    ("Groq", PROVIDER_GROQ),
+    ("OpenRouter", PROVIDER_OPENROUTER),
+    ("OpenCode Zen", PROVIDER_OPENCODE),
+)
+FALLBACK_SLOTS = (2, 3)
+
+API_KEY_SETTINGS = ("opencode_api_key", "openrouter_api_key", "google_api_key", "groq_api_key")
+ENV_KEY_NAMES = {
+    "opencode_api_key": ("OPENCODE_API_KEY", "OPENCODE_ZEN_API_KEY"),
+    "openrouter_api_key": ("OPENROUTER_API_KEY",),
+    "google_api_key": ("GOOGLE_API_KEY", "GEMINI_API_KEY"),
+    "groq_api_key": ("GROQ_API_KEY",),
+}
+
+
+def load_env_keys() -> dict[str, str]:
+    """Read API keys from the .env file next to this script (or the environment)."""
+    values: dict[str, str] = {}
+    env_path = Path(__file__).resolve().parent / ".env"
+    if env_path.is_file():
+        for line in env_path.read_text(encoding="utf-8", errors="ignore").splitlines():
+            line = line.strip()
+            if not line or line.startswith("#") or "=" not in line:
+                continue
+            name, value = line.split("=", 1)
+            name = name.strip().removeprefix("export ").strip()
+            values[name] = value.strip().strip('"').strip("'")
+    keys: dict[str, str] = {}
+    for setting, names in ENV_KEY_NAMES.items():
+        for name in names:
+            value = (values.get(name) or os.environ.get(name, "")).strip()
+            if value:
+                keys[setting] = value
+                break
+    return keys
 DEFAULT_RAM_THRESHOLD = 85
 
 
@@ -820,13 +813,13 @@ DEFAULT_RAM_THRESHOLD = 85
 # ╚══════════════════════════════════════════════════════════════════════════════╝
 
 class SettingsDialog(QDialog):
-    """Pop-up dialog for RAM threshold, playbooks, API keys, theme, and other preferences."""
+    """Pop-up dialog for model priority, API keys, theme, and other preferences."""
 
     def __init__(
         self,
         ram_threshold: int,
-        use_playbooks: bool = True,
-        playbook_count: int = 0,
+        model_slots: list[tuple[str, str]] | None = None,
+        env_keys: dict[str, str] | None = None,
         opencode_api_key: str = "",
         openrouter_api_key: str = "",
         google_api_key: str = "",
@@ -837,43 +830,105 @@ class SettingsDialog(QDialog):
         super().__init__(parent)
         self.setObjectName("SettingsDialog")
         self.setWindowTitle("⚙  Settings")
-        self.setFixedSize(440, 660)
+        self.setFixedSize(540, 700)
         self._theme = theme
         self.setStyleSheet(get_stylesheet(theme))
         self._colors = get_theme_colors(theme)
+        self._fetch_workers: dict[int, ModelFetchWorker] = {}
 
-        layout = QFormLayout(self)
+        outer = QVBoxLayout(self)
+        outer.setContentsMargins(0, 0, 0, 20)
+        scroll = QScrollArea()
+        scroll.setWidgetResizable(True)
+        scroll.setFrameShape(QFrame.Shape.NoFrame)
+        scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll.setStyleSheet("QScrollArea, QWidget#SettingsContent { background: transparent; }")
+        scroll.viewport().setAutoFillBackground(False)
+        content = QWidget()
+        content.setObjectName("SettingsContent")
+        scroll.setWidget(content)
+        outer.addWidget(scroll)
+
+        layout = QFormLayout(content)
         layout.setSpacing(14)
-        layout.setContentsMargins(28, 24, 28, 24)
+        layout.setContentsMargins(28, 24, 28, 8)
 
-        # ── Playbooks section ─────────────────────────────────────────────
-        playbook_header = QLabel("PLAYBOOKS")
-        playbook_header.setStyleSheet(
+        # ── Model priority section ────────────────────────────────────────
+        models_header = QLabel("MODEL PRIORITY")
+        models_header.setStyleSheet(
             f"color: {self._colors['accent']}; font-size: 10px; font-weight: 700; "
-            "letter-spacing: 2px; padding-top: 4px;"
+            "letter-spacing: 2px; padding-top: 8px;"
         )
-        layout.addRow(playbook_header)
+        layout.addRow(models_header)
+        models_note = QLabel(
+            "Model 1 is used first. If it fails (error, rate limit, bad key),\n"
+            "MyBot falls back to Model 2, then Model 3."
+        )
+        models_note.setStyleSheet(f"font-size: 10px; color: {self._colors['muted']};")
+        layout.addRow(models_note)
 
-        self.playbooks_checkbox = QCheckBox(
-            f"Enable playbook learning  ({playbook_count} saved)"
-        )
-        self.playbooks_checkbox.setChecked(use_playbooks)
-        self.playbooks_checkbox.setToolTip(
-            "When enabled, successful tasks are recorded and replayed\n"
-            "for similar future requests — saving time and API costs."
-        )
-        self.playbooks_checkbox.setStyleSheet(f"color: {self._colors['muted']}; font-size: 12px;")
-        layout.addRow(self.playbooks_checkbox)
+        self._slot_rows: list[tuple[QComboBox, QComboBox, QPushButton]] = []
+        slots = list(model_slots or [])
+        slots += [("", "")] * (1 + len(FALLBACK_SLOTS) - len(slots))
+        for index, (slot_provider, slot_model) in enumerate(slots):
+            provider_combo = QComboBox()
+            if index > 0:
+                provider_combo.addItem("— None —", "")
+            for label, provider_id in PROVIDER_CHOICES:
+                provider_combo.addItem(label, provider_id)
+            found = provider_combo.findData(slot_provider)
+            provider_combo.setCurrentIndex(found if found >= 0 else 0)
 
-        self.clear_playbooks_btn = QPushButton(f"Clear All Playbooks ({playbook_count})")
-        self.clear_playbooks_btn.setToolTip("Delete all saved playbooks")
-        self.clear_playbooks_btn.setStyleSheet(
-            "color: #ff6677; border-color: rgba(255, 68, 119, 0.3); "
-            "font-size: 11px; padding: 6px 12px;"
+            model_combo = QComboBox()
+            model_combo.setEditable(True)
+            model_combo.setMinimumWidth(170)
+            model_combo.lineEdit().setPlaceholderText("model id")
+            if slot_model:
+                model_combo.addItem(slot_model)
+                model_combo.setCurrentText(slot_model)
+
+            fetch_btn = QPushButton("↻")
+            fetch_btn.setToolTip("Load available models for this provider")
+            fetch_btn.setFixedSize(30, 30)
+            fetch_btn.setStyleSheet("QPushButton { min-width: 30px; max-width: 30px; padding: 0; }")
+
+            row = QWidget()
+            row_layout = QHBoxLayout(row)
+            row_layout.setContentsMargins(0, 0, 0, 0)
+            row_layout.setSpacing(6)
+            row_layout.addWidget(provider_combo)
+            row_layout.addWidget(model_combo, stretch=1)
+            row_layout.addWidget(fetch_btn)
+            layout.addRow(f"Model {index + 1}:", row)
+
+            provider_combo.currentIndexChanged.connect(
+                lambda _i, n=index: self._on_slot_provider_changed(n)
+            )
+            fetch_btn.clicked.connect(lambda _c=False, n=index: self._fetch_slot_models(n))
+            self._slot_rows.append((provider_combo, model_combo, fetch_btn))
+            self._update_slot_enabled(index)
+
+        # ── API keys note ─────────────────────────────────────────────────
+        env_keys = env_keys or {}
+        keys_header = QLabel("API KEYS")
+        keys_header.setStyleSheet(
+            f"color: {self._colors['accent']}; font-size: 10px; font-weight: 700; "
+            "letter-spacing: 2px; padding-top: 8px;"
         )
-        self._playbooks_cleared = False
-        self.clear_playbooks_btn.clicked.connect(self._on_clear_playbooks)
-        layout.addRow("", self.clear_playbooks_btn)
+        layout.addRow(keys_header)
+        key_labels = {
+            "opencode_api_key": "OpenCode Zen",
+            "openrouter_api_key": "OpenRouter",
+            "google_api_key": "Google Gemini",
+            "groq_api_key": "Groq",
+        }
+        env_names = ", ".join(key_labels[k] for k in API_KEY_SETTINGS if k in env_keys) or "none"
+        keys_note = QLabel(
+            "Keys in the .env file next to main.py are loaded automatically\n"
+            f"(found: {env_names}). Anything you type here overrides them."
+        )
+        keys_note.setStyleSheet(f"font-size: 10px; color: {self._colors['muted']};")
+        layout.addRow(keys_note)
 
         # ── OpenCode Zen section ───────────────────────────────────────────
         opencode_header = QLabel("OPENCODE ZEN")
@@ -991,20 +1046,85 @@ class SettingsDialog(QDialog):
         )
         btn_box.accepted.connect(self.accept)
         btn_box.rejected.connect(self.reject)
-        layout.addRow(btn_box)
+        btn_row = QHBoxLayout()
+        btn_row.setContentsMargins(28, 0, 28, 0)
+        btn_row.addWidget(btn_box)
+        outer.addLayout(btn_row)
 
-    def _on_clear_playbooks(self):
-        """Clear all saved playbooks."""
-        try:
-            store = PlaybookStore()
-            for entry in store.list_all():
-                store.delete(entry["id"])
-            self._playbooks_cleared = True
-            self.clear_playbooks_btn.setText("✓ Cleared!")
-            self.clear_playbooks_btn.setEnabled(False)
-            self.playbooks_checkbox.setText("Enable playbook learning  (0 saved)")
-        except Exception as e:
-            self.clear_playbooks_btn.setText(f"Error: {e}")
+    # ── Model priority helpers ────────────────────────────────────────────
+
+    def model_slots(self) -> list[tuple[str, str]]:
+        """Return [(provider, model), …] for Model 1..N (provider "" = unused)."""
+        result = []
+        for provider_combo, model_combo, _ in self._slot_rows:
+            provider = provider_combo.currentData() or ""
+            model = model_combo.currentText().strip() if provider else ""
+            result.append((provider, model))
+        return result
+
+    def slot_model_items(self, index: int) -> list[str]:
+        model_combo = self._slot_rows[index][1]
+        return [model_combo.itemText(i) for i in range(model_combo.count())]
+
+    def _update_slot_enabled(self, index: int):
+        provider_combo, model_combo, fetch_btn = self._slot_rows[index]
+        enabled = bool(provider_combo.currentData())
+        model_combo.setEnabled(enabled)
+        fetch_btn.setEnabled(enabled)
+
+    def _on_slot_provider_changed(self, index: int):
+        model_combo = self._slot_rows[index][1]
+        model_combo.clear()
+        self._update_slot_enabled(index)
+        self._fetch_slot_models(index)
+
+    def _fetch_slot_models(self, index: int):
+        provider_combo, model_combo, fetch_btn = self._slot_rows[index]
+        provider = provider_combo.currentData()
+        if not provider:
+            return
+        running = self._fetch_workers.get(index)
+        if running and running.isRunning():
+            return
+        worker = ModelFetchWorker(
+            provider=provider,
+            opencode_api_key=self.opencode_key_edit.text().strip(),
+            openrouter_api_key=self.openrouter_key_edit.text().strip(),
+            google_api_key=self.google_key_edit.text().strip(),
+            groq_api_key=self.groq_key_edit.text().strip(),
+            parent=self,
+        )
+        fetch_btn.setText("…")
+        model_combo.setToolTip("")
+        worker.models_fetched.connect(lambda models, n=index: self._on_slot_models(n, models))
+        worker.fetch_failed.connect(lambda err, n=index: self._on_slot_models_failed(n, err))
+        worker.finished.connect(lambda b=fetch_btn: b.setText("↻"))
+        self._fetch_workers[index] = worker
+        worker.start()
+
+    def _on_slot_models(self, index: int, models: list):
+        model_combo = self._slot_rows[index][1]
+        current = model_combo.currentText().strip()
+        model_combo.clear()
+        model_combo.addItems(models)
+        if current and model_combo.findText(current) >= 0:
+            model_combo.setCurrentText(current)
+        elif current:
+            model_combo.insertItem(0, current)
+            model_combo.setCurrentIndex(0)
+        elif models:
+            model_combo.setCurrentIndex(0)
+
+    def _on_slot_models_failed(self, index: int, error: str):
+        model_combo = self._slot_rows[index][1]
+        model_combo.setToolTip(f"Could not load models: {error}")
+        model_combo.lineEdit().setPlaceholderText("couldn't load — type a model id")
+
+    def done(self, result: int):
+        for worker in self._fetch_workers.values():
+            if worker.isRunning():
+                worker.wait(15000)
+        super().done(result)
 
 
 # ╔══════════════════════════════════════════════════════════════════════════════╗
@@ -1090,8 +1210,8 @@ class CornerBubble(QPushButton):
 class DockWindow(QWidget):
     """
     Frameless dock bar pinned to the bottom of the primary screen.
-    Contains a prompt input, model selector, browser mode toggle (Chromium /
-    Chrome Extension), control buttons, a collapsible log pane, RAM monitor,
+    Contains a prompt input, model selector, Chrome extension status,
+    control buttons, a collapsible log pane, RAM monitor,
     and wires up to the AgentWorker thread.
     """
 
@@ -1102,24 +1222,30 @@ class DockWindow(QWidget):
         self._settings = QSettings(SETTINGS_ORG, SETTINGS_APP)
         self.model_name = self._settings.value("model_name", DEFAULT_MODEL, str)
         self.ram_threshold = self._settings.value("ram_threshold", DEFAULT_RAM_THRESHOLD, int)
-        self.use_playbooks = self._settings.value("use_playbooks", True, bool)
-        self.use_extension = self._settings.value("use_extension", False, bool)
         self.custom_guidelines = self._settings.value("custom_guidelines", "", str)
         p = self._settings.value("provider", PROVIDER_OLLAMA, str)
         self.provider = str(p or "").lower().strip() or PROVIDER_OLLAMA
         self.theme = self._settings.value("theme", THEME_DARK, str)
         if self.theme not in (THEME_DARK, THEME_LIGHT):
             self.theme = THEME_DARK
-        self.opencode_api_key = self._settings.value("opencode_api_key", "", str)
-        self.openrouter_api_key = self._settings.value("openrouter_api_key", "", str)
-        self.google_api_key = self._settings.value("google_api_key", "", str)
-        self.groq_api_key = self._settings.value("groq_api_key", "", str)
+        # API keys: a key saved in Settings wins; otherwise use the one from .env
+        self._env_keys = load_env_keys()
+        for key_name in API_KEY_SETTINGS:
+            saved = self._settings.value(key_name, "", str)
+            setattr(self, key_name, saved or self._env_keys.get(key_name, ""))
+        # Fallback models (Model 2 / Model 3)
+        self.fallback_models: list[tuple[str, str]] = [
+            (
+                self._settings.value(f"model{slot}_provider", "", str),
+                self._settings.value(f"model{slot}_name", "", str),
+            )
+            for slot in FALLBACK_SLOTS
+        ]
 
         # ── State ──────────────────────────────────────────────────────────
         self._agent_worker: AgentWorker | None = None
         self._model_fetch_worker: ModelFetchWorker | None = None
         self._model_warmup_worker: ModelWarmupWorker | None = None
-        self._ext_probe_worker: ExtensionProbeWorker | None = None
         self._log_visible = False
         self._current_anim = None
         self._ext_connected = False
@@ -1234,24 +1360,11 @@ class DockWindow(QWidget):
 
         bar_layout.addWidget(self._make_sep(1, 24))
 
-        # ── Browser mode toggle ───────────────────────────────────────────
-        self.browser_toggle_btn = QPushButton("Chromium")
-        self.browser_toggle_btn.setObjectName("BrowserToggle")
-        self.browser_toggle_btn.setToolTip(
-            "Toggle between built-in Chromium and your Chrome (via extension)"
-        )
-        self.browser_toggle_btn.setCheckable(True)
-        self.browser_toggle_btn.setChecked(self.use_extension)
-        self.browser_toggle_btn.clicked.connect(self._on_browser_toggle)
-        self._update_browser_toggle_style()
-        bar_layout.addWidget(self.browser_toggle_btn)
-
         # Extension status dot
         self.ext_status_label = QLabel("●")
         self.ext_status_label.setObjectName("ExtStatus")
         self.ext_status_label.setToolTip("Extension connection status")
         self._update_ext_status_display(False, "Not connected")
-        self.ext_status_label.setVisible(self.use_extension)
         bar_layout.addWidget(self.ext_status_label)
 
         # Install extension button
@@ -1263,7 +1376,6 @@ class DockWindow(QWidget):
             QPushButton { min-width: 32px; max-width: 32px; padding: 0; font-size: 14px; }
         """)
         self.ext_install_btn.clicked.connect(self._on_install_extension)
-        self.ext_install_btn.setVisible(self.use_extension)
         bar_layout.addWidget(self.ext_install_btn)
 
         bar_layout.addWidget(self._make_sep(1, 24))
@@ -1271,11 +1383,8 @@ class DockWindow(QWidget):
         # ── Provider selector ──────────────────────────────────────────────
         self.provider_combo = QComboBox()
         self.provider_combo.setObjectName("ModelSelector")
-        self.provider_combo.addItem("Ollama (local)", PROVIDER_OLLAMA)
-        self.provider_combo.addItem("Google Gemini", PROVIDER_GOOGLE)
-        self.provider_combo.addItem("Groq", PROVIDER_GROQ)
-        self.provider_combo.addItem("OpenRouter", PROVIDER_OPENROUTER)
-        self.provider_combo.addItem("OpenCode Zen", PROVIDER_OPENCODE)
+        for label, provider_id in PROVIDER_CHOICES:
+            self.provider_combo.addItem(label, provider_id)
         valid = (PROVIDER_OLLAMA, PROVIDER_OPENCODE, PROVIDER_OPENROUTER, PROVIDER_GOOGLE, PROVIDER_GROQ)
         if self.provider not in valid:
             self.provider = PROVIDER_OLLAMA
@@ -1288,7 +1397,8 @@ class DockWindow(QWidget):
             self.provider_combo.setCurrentIndex(0)
             self.provider = PROVIDER_OLLAMA
         self.provider_combo.setToolTip(
-            "AI provider: Ollama, Google Gemini, Groq, OpenRouter, or OpenCode Zen"
+            "Model 1 provider: Ollama, Google Gemini, Groq, OpenRouter, or OpenCode Zen\n"
+            "Set fallback Model 2 / Model 3 in ⚙ Settings"
         )
         self.provider_combo.currentIndexChanged.connect(self._on_provider_index_changed)
         bar_layout.addWidget(self.provider_combo)
@@ -1297,7 +1407,7 @@ class DockWindow(QWidget):
         self.model_combo = QComboBox()
         self.model_combo.setObjectName("ModelSelector")
         self.model_combo.setEditable(True)
-        self.model_combo.setToolTip("Select AI model")
+        self.model_combo.setToolTip("Model 1 (primary). Set fallback Model 2 / Model 3 in ⚙ Settings")
         self.model_combo.addItem(self.model_name)
         self.model_combo.setCurrentText(self.model_name)
         self.model_combo.currentTextChanged.connect(self._on_model_changed)
@@ -1447,33 +1557,6 @@ class DockWindow(QWidget):
     # ║                  CHROME EXTENSION CONTROLS                         ║
     # ╚══════════════════════════════════════════════════════════════════════╝
 
-    def _on_browser_toggle(self):
-        """Toggle between built-in Chromium and Chrome Extension mode."""
-        self.use_extension = self.browser_toggle_btn.isChecked()
-        self._settings.setValue("use_extension", self.use_extension)
-        self._update_browser_toggle_style()
-
-        # Show/hide extension-related controls
-        self.ext_status_label.setVisible(self.use_extension)
-        self.ext_install_btn.setVisible(self.use_extension)
-
-        if self.use_extension:
-            self._probe_extension()
-            self._log(
-                "🔌  Switched to Chrome Extension mode — "
-                "drives your own Chrome via the bridge extension"
-            )
-        else:
-            self._log("🌐  Switched to built-in Chromium mode — launches fresh Chromium")
-
-    def _update_browser_toggle_style(self):
-        active = "true" if self.use_extension else "false"
-        text = "🔌 Chrome" if self.use_extension else "🌐 Chromium"
-        self.browser_toggle_btn.setText(text)
-        self.browser_toggle_btn.setProperty("active", active)
-        self.browser_toggle_btn.style().unpolish(self.browser_toggle_btn)
-        self.browser_toggle_btn.style().polish(self.browser_toggle_btn)
-
     def _update_ext_status_display(self, connected: bool, tooltip: str):
         self._ext_connected = connected
         if connected:
@@ -1526,7 +1609,7 @@ class DockWindow(QWidget):
             self._ext_last_log_state = state
             if state:
                 self._log("🟢  Chrome extension connected!")
-            elif self.use_extension:
+            else:
                 self._log("🔴  Chrome extension disconnected")
 
     def _probe_extension(self):
@@ -1574,6 +1657,22 @@ class DockWindow(QWidget):
         self.provider = self.provider_combo.itemData(index) or PROVIDER_OLLAMA
         self._settings.setValue("provider", self.provider)
         self._refresh_models()
+
+    def _set_primary_model(self, provider: str, model: str, items: list[str]):
+        """Apply Model 1 chosen in Settings to the dock's provider/model selectors."""
+        self.provider = provider
+        self._settings.setValue("provider", provider)
+        idx = self.provider_combo.findData(provider)
+        if idx >= 0:
+            self.provider_combo.blockSignals(True)
+            self.provider_combo.setCurrentIndex(idx)
+            self.provider_combo.blockSignals(False)
+        self.model_combo.blockSignals(True)
+        self.model_combo.clear()
+        self.model_combo.addItems(items or [model])
+        self.model_combo.setCurrentText(model)
+        self.model_combo.blockSignals(False)
+        self._on_model_changed(model)
 
     def _refresh_models(self):
         if self._model_fetch_worker and self._model_fetch_worker.isRunning():
@@ -1725,8 +1824,7 @@ class DockWindow(QWidget):
             self._log("⚠️  Agent is already running — stop it first.")
             return
 
-        # Pre-flight check for extension mode
-        if self.use_extension and not self._bridge.connected:
+        if not self._bridge.connected:
             self._log(
                 "❌  Chrome extension is not connected!\n"
                 "    Click the 📦 button to install the extension first."
@@ -1735,10 +1833,12 @@ class DockWindow(QWidget):
                 self._toggle_log()
             return
 
-        mode_label = "🔌 Chrome Extension" if self.use_extension else "🌐 Built-in Chromium"
         self._log(f"\n{'━' * 60}")
         self._log(f"📝  > {task}")
-        self._log(f"🤖  Model: {self.model_name}  |  Browser: {mode_label}")
+        fallbacks = "".join(
+            f"  →  {provider}/{model}" for provider, model in self.fallback_models if provider and model
+        )
+        self._log(f"🤖  Model: {self.provider}/{self.model_name}{fallbacks}")
         self._log(f"{'━' * 60}")
         self.prompt_input.clear()
         self.prompt_input.setEnabled(False)
@@ -1749,21 +1849,17 @@ class DockWindow(QWidget):
         if not self._log_visible:
             self._toggle_log()
 
-        geo = self._screen_geo
         self._agent_worker = AgentWorker(
             task=task,
-            screen_width=geo.width(),
-            screen_height=geo.height(),
             model_name=self.model_name,
-            use_extension=self.use_extension,
-            extension_bridge=self._bridge if self.use_extension else None,
-            use_playbooks=self.use_playbooks,
+            extension_bridge=self._bridge,
             custom_guidelines=self.custom_guidelines,
             provider=self.provider,
             opencode_api_key=self.opencode_api_key,
             openrouter_api_key=self.openrouter_api_key,
             google_api_key=self.google_api_key,
             groq_api_key=self.groq_api_key,
+            fallback_models=self.fallback_models,
             parent=self,
         )
         self._agent_worker.status_update.connect(self._on_status)
@@ -1788,13 +1884,10 @@ class DockWindow(QWidget):
         self._corner_bubble.set_theme(theme)
 
     def _on_settings(self):
-        store = PlaybookStore()
-        playbook_count = len(store.list_all())
-
         dlg = SettingsDialog(
             ram_threshold=self.ram_threshold,
-            use_playbooks=self.use_playbooks,
-            playbook_count=playbook_count,
+            model_slots=[(self.provider, self.model_name), *self.fallback_models],
+            env_keys=self._env_keys,
             opencode_api_key=self.opencode_api_key,
             openrouter_api_key=self.openrouter_api_key,
             google_api_key=self.google_api_key,
@@ -1806,20 +1899,27 @@ class DockWindow(QWidget):
             self.ram_threshold = dlg.ram_spin.value()
             self._settings.setValue("ram_threshold", self.ram_threshold)
 
-            self.use_playbooks = dlg.playbooks_checkbox.isChecked()
-            self._settings.setValue("use_playbooks", self.use_playbooks)
+            key_edits = {
+                "opencode_api_key": dlg.opencode_key_edit,
+                "openrouter_api_key": dlg.openrouter_key_edit,
+                "google_api_key": dlg.google_key_edit,
+                "groq_api_key": dlg.groq_key_edit,
+            }
+            for key_name, edit in key_edits.items():
+                typed = edit.text().strip()
+                env_value = self._env_keys.get(key_name, "")
+                setattr(self, key_name, typed or env_value)
+                # Only persist keys that differ from .env so .env stays the source of truth
+                self._settings.setValue(key_name, "" if typed == env_value else typed)
 
-            self.opencode_api_key = dlg.opencode_key_edit.text().strip()
-            self._settings.setValue("opencode_api_key", self.opencode_api_key)
-
-            self.openrouter_api_key = dlg.openrouter_key_edit.text().strip()
-            self._settings.setValue("openrouter_api_key", self.openrouter_api_key)
-
-            self.google_api_key = dlg.google_key_edit.text().strip()
-            self._settings.setValue("google_api_key", self.google_api_key)
-
-            self.groq_api_key = dlg.groq_key_edit.text().strip()
-            self._settings.setValue("groq_api_key", self.groq_api_key)
+            slots = dlg.model_slots()
+            primary_provider, primary_model = slots[0]
+            if primary_provider and primary_model:
+                self._set_primary_model(primary_provider, primary_model, dlg.slot_model_items(0))
+            self.fallback_models = slots[1:]
+            for slot, (provider, model) in zip(FALLBACK_SLOTS, self.fallback_models):
+                self._settings.setValue(f"model{slot}_provider", provider)
+                self._settings.setValue(f"model{slot}_name", model)
 
             new_theme = dlg.theme_combo.currentData() or THEME_DARK
             if new_theme != self.theme:
@@ -1827,14 +1927,7 @@ class DockWindow(QWidget):
                 self._settings.setValue("theme", self.theme)
                 self._apply_theme(self.theme)
 
-            pb_status = "ON" if self.use_playbooks else "OFF"
-            if dlg._playbooks_cleared:
-                pb_status += " (cleared)"
-
-            self._log(
-                f"⚙️  Settings updated  ▸  RAM = {self.ram_threshold}%"
-                f"  ▸  Playbooks = {pb_status}"
-            )
+            self._log(f"⚙️  Settings updated  ▸  RAM = {self.ram_threshold}%")
 
     def _on_help(self):
         """Open the README / help guide in the default app."""
@@ -1961,9 +2054,6 @@ class DockWindow(QWidget):
         self._ram_timer.stop()
         self._pulse_timer.stop()
         self._ext_timer.stop()
-
-        # Kill the persistent Chromium browser (if any)
-        BrowserSession.shutdown()
 
         # Shut down the WebSocket bridge (frees the port)
         self._bridge.stop()
